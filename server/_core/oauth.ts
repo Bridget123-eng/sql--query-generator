@@ -3,6 +3,7 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Express, Request, Response } from "express";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
+import { ENV } from "./env";
 import { sdk } from "./sdk";
 
 function getQueryParam(req: Request, key: string): string | undefined {
@@ -11,6 +12,23 @@ function getQueryParam(req: Request, key: string): string | undefined {
 }
 
 export function registerOAuthRoutes(app: Express) {
+  // This route exists only when running a local checkout without OAuth
+  // configuration. It makes the dashboards usable while keeping production
+  // OAuth-only.
+  app.get("/api/auth/dev-login", async (req: Request, res: Response) => {
+    if (ENV.isProduction) {
+      res.sendStatus(404);
+      return;
+    }
+
+    const token = await sdk.createSessionToken("local-developer", {
+      name: "Local Developer",
+      expiresInMs: ONE_YEAR_MS,
+    });
+    res.cookie(COOKIE_NAME, token, { ...getSessionCookieOptions(req), maxAge: ONE_YEAR_MS });
+    res.redirect(302, "/query");
+  });
+
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");

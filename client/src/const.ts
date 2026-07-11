@@ -15,6 +15,13 @@ export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 export const startLogin = () => {
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL;
   const appId = import.meta.env.VITE_APP_ID;
+
+  // A checked-out project normally has no Manus OAuth credentials. Let local
+  // development sign in through the server's development-only route instead.
+  if (!oauthPortalUrl || !appId) {
+    window.location.assign("/api/auth/dev-login");
+    return;
+  }
   const redirectUri = `${window.location.origin}/api/oauth/callback`;
 
   const nonce = crypto.randomUUID();
