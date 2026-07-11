@@ -7,4 +7,10 @@ export const ENV = {
   isProduction: process.env.NODE_ENV === "production",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+  // Local deployments can call OpenAI directly. The existing Forge variables
+  // remain supported for the hosted/runtime integration.
+  llmApiUrl: process.env.OPENAI_BASE_URL ?? process.env.BUILT_IN_FORGE_API_URL ?? "https://api.openai.com",
+  llmApiKey: process.env.OPENAI_API_KEY ?? process.env.BUILT_IN_FORGE_API_KEY ?? "",
+  llmModel: process.env.OPENAI_MODEL ?? "gpt-5-mini",
+  targetDatabaseUrl: process.env.TARGET_DATABASE_URL ?? "",
 };

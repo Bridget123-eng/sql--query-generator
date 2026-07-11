@@ -45,6 +45,7 @@ export default function QueryAssistant() {
   );
 
   const schemas = trpc.schemas.list.useQuery();
+  const databaseSchema = trpc.assistant.inspectMySQLSchema.useQuery();
 
   const handleGenerate = async () => {
     if (!prompt.trim()) {
@@ -166,6 +167,10 @@ export default function QueryAssistant() {
               />
             </div>
           </div>
+
+          {databaseSchema.data?.configured && (
+            <p className="text-sm text-emerald-300">Connected to MySQL database: {databaseSchema.data.database}. Its schema is automatically used when no saved or custom schema is selected.</p>
+          )}
 
           <Button
             onClick={handleGenerate}
@@ -381,6 +386,12 @@ export default function QueryAssistant() {
                         <div className="text-white font-semibold text-lg">
                           {executionResults.rowsAffected}
                         </div>
+                      </div>
+                    )}
+                    {executionResults.executionTimeMs !== undefined && (
+                      <div className="bg-slate-800 border border-white border-opacity-10 rounded p-4">
+                        <div className="text-gray-400 text-sm">Execution Time</div>
+                        <div className="text-white font-semibold text-lg">{executionResults.executionTimeMs} ms</div>
                       </div>
                     )}
                   </div>

@@ -1,4 +1,5 @@
 import { invokeLLM } from "./_core/llm";
+import { ENV } from "./_core/env";
 
 type QueryImpact = {
   warnings: string[];
@@ -7,22 +8,92 @@ type QueryImpact = {
   analysis: string;
 };
 
-/** A deterministic fallback keeps the core demo usable if an AI provider is unavailable. */
-function localSqlFallback(input: string): string[] {
-  const text = input.toLowerCase().replace(/[\u20b9,]/g, "");
-  if (/employees?.*salary.*(?:greater|more|above|over|>)\s*(?:than\s*)?(\d+)/i.test(text)) {
-    const salary = text.match(/(?:greater|more|above|over|>)\s*(?:than\s*)?(\d+)/i)?.[1] ?? "50000";
-    return [`SELECT *\nFROM Employee\nWHERE Salary > ${salary};`];
+const reservedWords = new Set(["all", "the", "a", "an", "records", "record", "data", "details", "whose", "where", "with"]);
+
+function identifier(value: string): string | undefined {
+  const cleaned = value.replace(/[^a-zA-Z0-9_]/g, "");
+  return cleaned && !reservedWords.has(cleaned.toLowerCase()) ? cleaned : undefined;
+}
+
+function extractTable(prompt: string, schema: string): string | undefined {
+  const fromPrompt = prompt.match(/\bfrom\s+([a-zA-Z_]\w*)/i)?.[1]
+    ?? prompt.match(/\b(?:top|first)\s+\d+\s+([a-zA-Z_]\w*)/i)?.[1]
+    ?? prompt.match(/\b(?:increase|raise|change|update)\s+.+?\b(?:of|in|for)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z_]\w*)/i)?.[1]
+    ?? prompt.match(/\b(?:show|list|find|get|display|retrieve|delete|remove|update|change|add)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z_]\w*)/i)?.[1]
+    ?? prompt.match(/\b(?:how many|count|number of)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z_]\w*)/i)?.[1];
+  const requested = identifier(fromPrompt ?? "");
+  if (!requested) return undefined;
+
+  const schemaTables = [...schema.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?([a-zA-Z_]\w*)/gi)].map(match => match[1]);
+  const normalized = requested.toLowerCase().replace(/s$/, "");
+  return schemaTables.find(table => table.toLowerCase() === requested.toLowerCase())
+    ?? schemaTables.find(table => table.toLowerCase().replace(/s$/, "") === normalized)
+    ?? requested;
+}
+
+function quoteValue(value: string): string {
+  const trimmed = value.trim().replace(/[.,;]+$/, "");
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return trimmed;
+  return `'${trimmed.replace(/'/g, "''")}'`;
+}
+
+function extractFilter(prompt: string): string | undefined {
+  const comparison = prompt.match(/\b([a-zA-Z_]\w*)\s*(?:is\s+)?(>=|<=|!=|<>|=|>|<|greater than|more than|above|over|less than|below)\s*(?:than\s+)?(?:₹|\$)?([\w.-]+)/i);
+  if (comparison) {
+    const operator = ({ "greater than": ">", "more than": ">", above: ">", over: ">", "less than": "<", below: "<" } as Record<string, string>)[comparison[2].toLowerCase()] ?? comparison[2];
+    return `${comparison[1]} ${operator} ${quoteValue(comparison[3])}`;
   }
-  if (/(top|highest).*(?:students?|cgpa)/i.test(text)) {
-    const limit = text.match(/top\s+(\d+)/i)?.[1] ?? "5";
-    return [`SELECT *\nFROM Students\nORDER BY CGPA DESC\nLIMIT ${limit};`];
+  const department = prompt.match(/\b(?:in|for)\s+([a-zA-Z0-9_ -]+?)\s+department\b/i);
+  if (department) return `Department = ${quoteValue(department[1])}`;
+  const equality = prompt.match(/\b(?:where|with|whose)\s+([a-zA-Z_]\w*)\s+(?:is|equals?|is equal to)\s+['"]?([a-zA-Z0-9_ -]+)['"]?/i);
+  return equality ? `${equality[1]} = ${quoteValue(equality[2])}` : undefined;
+}
+
+/**
+ * Generates syntactically-valid SQL for common plain-English requests when the
+ * hosted AI service is unavailable. It intentionally derives names from the
+ * request/schema instead of using a fixed list of sample tables.
+ */
+export function localSqlFallback(input: string, schema = ""): string[] {
+  const prompt = input.replace(/[\u20b9,$]/g, "").replace(/,/g, "").replace(/\s+/g, " ").trim();
+  const table = extractTable(prompt, schema);
+  if (!table) {
+    return ["-- Please name the table to query, or select/paste a database schema so I can identify it safely."];
   }
-  if (/(increase|raise).*(?:salary).*(?:it).*(\d+)\s*%/i.test(text)) {
-    const percent = Number(text.match(/(\d+)\s*%/)?.[1] ?? "10") / 100;
-    return [`UPDATE Employee\nSET Salary = Salary * ${(1 + percent).toFixed(2)}\nWHERE Department = 'IT';`];
+
+  const filter = extractFilter(prompt);
+  const limit = prompt.match(/\b(?:top|first|limit)\s+(\d+)/i)?.[1];
+  const sort = prompt.match(/\b(?:highest|largest|most)\s+([a-zA-Z_]\w*)/i)?.[1]
+    ?? prompt.match(/\b(?:lowest|smallest|least)\s+([a-zA-Z_]\w*)/i)?.[1];
+  const descending = /\b(highest|largest|most|descending|desc)\b/i.test(prompt);
+
+  if (/\b(delete|remove)\b/i.test(prompt)) {
+    return [`DELETE FROM ${table}${filter ? `\nWHERE ${filter}` : ""};`];
   }
-  return ["-- Add a database schema or refine the request so a safe query can be generated."];
+  if (/\b(increase|raise)\b/i.test(prompt)) {
+    const field = prompt.match(/\b(increase|raise)\s+([a-zA-Z_]\w*)/i)?.[2];
+    const percentage = prompt.match(/(\d+(?:\.\d+)?)\s*%/)?.[1];
+    if (field && percentage) {
+      return [`UPDATE ${table}\nSET ${field} = ${field} * ${(1 + Number(percentage) / 100).toFixed(4)}${filter ? `\nWHERE ${filter}` : ""};`];
+    }
+  }
+  if (/\b(update|change|set)\b/i.test(prompt)) {
+    const assignment = prompt.match(/\b(?:set|change)\s+([a-zA-Z_]\w*)\s+(?:to|=)\s+['"]?([a-zA-Z0-9_ .-]+)['"]?/i);
+    if (assignment) return [`UPDATE ${table}\nSET ${assignment[1]} = ${quoteValue(assignment[2])}${filter ? `\nWHERE ${filter}` : ""};`];
+  }
+  if (/\b(count|how many|number of)\b/i.test(prompt)) {
+    return [`SELECT COUNT(*) AS total\nFROM ${table}${filter ? `\nWHERE ${filter}` : ""};`];
+  }
+
+  const query = [`SELECT *`, `FROM ${table}`];
+  if (filter) query.push(`WHERE ${filter}`);
+  if (sort) query.push(`ORDER BY ${sort} ${descending ? "DESC" : "ASC"}`);
+  if (limit) query.push(`LIMIT ${limit}`);
+  return [`${query.join("\n")};`];
+}
+
+function isSupportedSql(statement: string): boolean {
+  return /^(SELECT|INSERT|UPDATE|DELETE)\b/i.test(statement.trim());
 }
 
 function localExplanation(query: string): string {
@@ -63,11 +134,12 @@ export async function generateSQLQuery(
   const systemPrompt = `You are an expert SQL query generator. Your task is to convert natural language requirements into valid, optimized SQL queries.
 
 When generating queries:
-1. Return ONLY the SQL query code, no explanation. If multiple valid interpretations exist, return up to 3 distinct queries, each enclosed in triple backticks with sql language tag.
+1. Understand ordinary, conversational user requests and return ONLY the SQL query code, no explanation. If multiple valid interpretations exist, return up to 3 distinct queries, each enclosed in triple backticks with sql language tag.
 2. Support MySQL/PostgreSQL syntax
 3. Use proper formatting and indentation
 4. Include comments for complex logic
 5. Optimize for performance
+6. Use the supplied schema exactly when it is available. If no schema is supplied, infer sensible table and column names from the request instead of refusing to generate a query.
 
 Available database schema:
 ${schema}
@@ -76,7 +148,7 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
 
   try {
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: input },
@@ -85,19 +157,24 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
   });
 
   const content = response.choices[0]?.message.content;
-  if (typeof content !== "string") return localSqlFallback(input);
+  if (typeof content !== "string") return localSqlFallback(input, schema);
 
   // Extract all SQL blocks
   const queries = content.match(/```(?:sql)?\s*\n([\s\S]*?)\n```/gi);
   if (queries) {
-    return queries.map(q => q.replace(/^```(?:sql)?\s*\n|\n```$/gi, "").trim()).filter(Boolean).slice(0, 3);
+    const extracted = queries
+      .map(q => q.replace(/^```(?:sql)?\s*\n|\n```$/gi, "").trim())
+      .filter(isSupportedSql)
+      .slice(0, 3);
+    return extracted.length ? extracted : localSqlFallback(input, schema);
   } else {
-    // If no blocks, assume it's a single query directly
-    return content.trim() ? [content.trim()] : localSqlFallback(input);
+    // A provider can return a prose refusal or an error message. Never show it
+    // as though it were executable SQL.
+    return isSupportedSql(content) ? [content.trim()] : localSqlFallback(input, schema);
   }
   } catch (error) {
     console.warn("AI SQL generation unavailable; using local fallback", error);
-    return localSqlFallback(input);
+    return localSqlFallback(input, schema);
   }
 }
 
@@ -119,7 +196,7 @@ ${schema}`;
 
   try {
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Explain this SQL query:\n\n${query}` },
@@ -168,7 +245,7 @@ ${schema}`;
 
   try {
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Analyze this query:\n\n${query}` },
@@ -241,7 +318,7 @@ When generating code:
 ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
 
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: input },
@@ -267,7 +344,7 @@ When explaining:
 5. Keep explanations concise but thorough`;
 
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Explain this ${language} code:\n\n${code}` },
@@ -311,7 +388,7 @@ Be thorough in identifying:
     : `Debug this ${language} code:\n\n${code}`;
 
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userMessage },
@@ -373,7 +450,7 @@ When optimizing:
 5. Enhance code clarity`;
 
   const response = await invokeLLM({
-    model: "gpt-5-mini",
+    model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Optimize this ${language} code:\n\n${code}` },

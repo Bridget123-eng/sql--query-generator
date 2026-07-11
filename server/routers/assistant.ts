@@ -21,6 +21,7 @@ import {
   getDb,
 } from "../db";
 import { queryHistory, executionResults } from "../../drizzle/schema";
+import { executeMySqlQuery, inspectMySqlSchema, isTargetDatabaseConfigured } from "../target-database";
 
 export const assistantRouter = router({
   /**
@@ -47,16 +48,21 @@ export const assistantRouter = router({
       }
 
       try {
-        // Simulate query execution for now
-        // In a real application, this would connect to a database and execute the query
+        const startedAt = Date.now();
         let rowsAffected = 0;
         let rowsReturned = 0;
         let result: any = null;
         let error: string | null = null;
+        let executionTimeMs = 0;
+        let simulated = !isTargetDatabaseConfigured();
 
-        // A schema describes structure, not a database connection. Return a clear,
-        // deterministic preview instead of claiming that random rows were executed.
-        if (operation === "SELECT") {
+        if (isTargetDatabaseConfigured()) {
+          const executed = await executeMySqlQuery(statement);
+          rowsAffected = executed.rowsAffected;
+          rowsReturned = executed.rowsReturned;
+          result = executed.result;
+          executionTimeMs = executed.executionTimeMs;
+        } else if (operation === "SELECT") {
           const limit = Number(statement.match(/\bLIMIT\s+(\d+)/i)?.[1] ?? 25);
           rowsReturned = Math.min(Math.max(limit, 1), 100);
           result = [{ preview: "No database connection configured", query: statement }];
@@ -66,6 +72,7 @@ export const assistantRouter = router({
           rowsAffected = 1;
           result = { preview: "Insert query validated but not run: configure a database connection to execute it." };
         }
+        if (simulated) executionTimeMs = Date.now() - startedAt;
 
         // Record execution result
         if (input.queryHistoryId) {
@@ -73,13 +80,13 @@ export const assistantRouter = router({
             queryHistoryId: input.queryHistoryId,
             rowsAffected,
             rowsReturned,
-            result: result ? JSON.stringify(result) : null,
-            error,
+            result: result ? JSON.stringify(result) : undefined,
+           error: error ?? undefined,
           });
           await updateQueryHistory(input.queryHistoryId, { executedAt: new Date() });
         }
 
-        return { rowsAffected, rowsReturned, result, error, simulated: true };
+        return { rowsAffected, rowsReturned, result, error, simulated, executionTimeMs };
       } catch (e: any) {
         console.error("SQL execution error:", e);
         const errorMessage = e.message || "Failed to execute query";
@@ -88,7 +95,7 @@ export const assistantRouter = router({
             queryHistoryId: input.queryHistoryId,
             rowsAffected: 0,
             rowsReturned: 0,
-            result: null,
+          result: undefined,
             error: errorMessage,
           });
           await updateQueryHistory(input.queryHistoryId, { executedAt: new Date() });
@@ -109,7 +116,8 @@ export const assistantRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const schema = input.customSchema || (input.schemaId ? await getSchemaDefinitionById(input.schemaId) : null);
-      const schemaText = schema ? (typeof schema === "object" ? schema.schema : schema) : "No schema provided";
+      const discoveredSchema = !schema && isTargetDatabaseConfigured() ? await inspectMySqlSchema() : null;
+      const schemaText = schema ? (typeof schema === "object" ? schema.schema : schema) : (discoveredSchema?.schema ?? "No schema provided");
 
       try {
         // Create query history record
@@ -150,6 +158,15 @@ export const assistantRouter = router({
         throw new Error("Failed to generate SQL query");
       }
     }),
+
+  /** Read tables, columns, primary keys, and foreign keys from the configured MySQL database. */
+  inspectMySQLSchema: protectedProcedure.query(async () => {
+    if (!isTargetDatabaseConfigured()) {
+      return { configured: false, database: null, schema: null };
+    }
+    const discovered = await inspectMySqlSchema();
+    return { configured: true, ...discovered };
+  }),
 
   /**
    * SQL Query Explanation

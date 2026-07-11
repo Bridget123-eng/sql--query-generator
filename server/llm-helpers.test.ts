@@ -7,6 +7,7 @@ import {
   explainCode,
   debugCode,
   optimizeCode,
+  localSqlFallback,
 } from "./llm-helpers";
 
 // Mock the invokeLLM function
@@ -105,13 +106,36 @@ describe("LLM Helpers", () => {
         "CREATE TABLE Employee (id INT, name VARCHAR(100), Salary INT);"
       );
 
-      expect(result).toContain("SELECT");
-      expect(result).toContain("Employee");
+      expect(result).toHaveLength(1);
+      expect(result[0]).toContain("SELECT");
+      expect(result[0]).toContain("Employee");
     });
 
     it("should handle empty input gracefully", async () => {
       const result = await generateSQLQuery("", "");
-      expect(typeof result).toBe("string");
+      expect(Array.isArray(result)).toBe(true);
+    });
+  });
+
+  describe("local SQL fallback", () => {
+    it("interprets a normal read request without a hard-coded table list", () => {
+      const [query] = localSqlFallback("Show all customers where balance is greater than 1000");
+      expect(query).toBe("SELECT *\nFROM customers\nWHERE balance > 1000;");
+    });
+
+    it("uses the supplied schema and understands sorting and limits", () => {
+      const [query] = localSqlFallback(
+        "Find the top 3 students with highest CGPA",
+        "CREATE TABLE Students (id INT, cgpa DECIMAL(3,2));"
+      );
+      expect(query).toBe("SELECT *\nFROM Students\nORDER BY CGPA DESC\nLIMIT 3;");
+    });
+
+    it("interprets a filtered percentage increase", () => {
+      const [query] = localSqlFallback("Increase salary of all employees in IT department by 10%");
+      expect(query).toContain("UPDATE employees");
+      expect(query).toContain("SET salary = salary * 1.1000");
+      expect(query).toContain("WHERE Department = 'IT'");
     });
   });
 
