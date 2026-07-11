@@ -45,7 +45,9 @@ async function startServer() {
     })
   );
   // development mode uses Vite, production mode uses static files
-  if (process.env.NODE_ENV === "development") {
+  // Default to Vite in local development. This project contains TypeScript/TSX,
+  // which must be transformed by Vite rather than opened with a static server.
+  if (process.env.NODE_ENV !== "production") {
     await setupVite(app, server);
   } else {
     serveStatic(app);
