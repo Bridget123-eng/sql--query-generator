@@ -1,0 +1,386 @@
+import { invokeLLM } from "./_core/llm";
+
+type QueryImpact = {
+  warnings: string[];
+  estimatedRows: string;
+  riskLevel: "low" | "medium" | "high";
+  analysis: string;
+};
+
+/** A deterministic fallback keeps the core demo usable if an AI provider is unavailable. */
+function localSqlFallback(input: string): string[] {
+  const text = input.toLowerCase().replace(/[\u20b9,]/g, "");
+  if (/employees?.*salary.*(?:greater|more|above|over|>)\s*(?:than\s*)?(\d+)/i.test(text)) {
+    const salary = text.match(/(?:greater|more|above|over|>)\s*(?:than\s*)?(\d+)/i)?.[1] ?? "50000";
+    return [`SELECT *\nFROM Employee\nWHERE Salary > ${salary};`];
+  }
+  if (/(top|highest).*(?:students?|cgpa)/i.test(text)) {
+    const limit = text.match(/top\s+(\d+)/i)?.[1] ?? "5";
+    return [`SELECT *\nFROM Students\nORDER BY CGPA DESC\nLIMIT ${limit};`];
+  }
+  if (/(increase|raise).*(?:salary).*(?:it).*(\d+)\s*%/i.test(text)) {
+    const percent = Number(text.match(/(\d+)\s*%/)?.[1] ?? "10") / 100;
+    return [`UPDATE Employee\nSET Salary = Salary * ${(1 + percent).toFixed(2)}\nWHERE Department = 'IT';`];
+  }
+  return ["-- Add a database schema or refine the request so a safe query can be generated."];
+}
+
+function localExplanation(query: string): string {
+  const operation = query.trim().match(/^(SELECT|INSERT|UPDATE|DELETE)/i)?.[1]?.toUpperCase();
+  const tables = [...query.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+([`"\w.]+)/gi)].map((match) => match[1].replace(/[`"]+/g, ""));
+  const where = /\bWHERE\b/i.test(query);
+  const limit = query.match(/\bLIMIT\s+(\d+)/i)?.[1];
+  const tableText = tables.length ? `It uses ${tables.join(", ")}.` : "It does not identify a table.";
+  if (operation === "SELECT") return `Returns matching records. ${tableText} ${where ? "The WHERE clause filters the rows." : "No WHERE clause is applied."}${limit ? ` LIMIT restricts the response to ${limit} row(s).` : ""}`;
+  if (operation === "UPDATE") return `Changes existing records. ${tableText} ${where ? "The WHERE clause limits which rows are updated." : "There is no WHERE clause, so every row may be updated."}`;
+  if (operation === "DELETE") return `Removes records. ${tableText} ${where ? "The WHERE clause limits which rows are removed." : "There is no WHERE clause, so every row may be removed."}`;
+  if (operation === "INSERT") return `Adds new record(s). ${tableText}`;
+  return "The generated text is not a recognized SQL statement.";
+}
+
+function localImpact(query: string): QueryImpact {
+  const operation = query.trim().match(/^(SELECT|INSERT|UPDATE|DELETE)/i)?.[1]?.toUpperCase();
+  const hasWhere = /\bWHERE\b/i.test(query);
+  const limit = query.match(/\bLIMIT\s+(\d+)/i)?.[1];
+  if (operation === "DELETE" || operation === "UPDATE") {
+    const risky = !hasWhere;
+    return { warnings: risky ? [`${operation} has no WHERE clause and may change every row.`] : ["Review the matching rows before executing this write operation."], estimatedRows: risky ? "All rows in the target table" : "Depends on rows matching the filter", riskLevel: risky ? "high" : "medium", analysis: risky ? "This is a broad data-changing operation." : "This is a filtered data-changing operation; confirm the preview before execution." };
+  }
+  if (operation === "INSERT") return { warnings: [], estimatedRows: "1 or more rows", riskLevel: "medium", analysis: "This inserts data. Verify required columns and constraints first." };
+  if (operation === "SELECT") return { warnings: hasWhere ? [] : ["No WHERE clause may return a large result set."], estimatedRows: limit ? `${limit} rows at most` : "Depends on the table size and filters", riskLevel: hasWhere || limit ? "low" : "medium", analysis: "Read-only query; no database records will be changed." };
+  return { warnings: ["The SQL statement could not be validated."], estimatedRows: "Unknown", riskLevel: "high", analysis: "Only SELECT, INSERT, UPDATE, and DELETE statements are supported." };
+}
+
+/**
+ * Generate SQL query from natural language with streaming support
+ * Returns the full response for streaming to client
+ */
+export async function generateSQLQuery(
+  input: string,
+  schema: string,
+  previousContext?: string
+): Promise<string[]> {
+  const systemPrompt = `You are an expert SQL query generator. Your task is to convert natural language requirements into valid, optimized SQL queries.
+
+When generating queries:
+1. Return ONLY the SQL query code, no explanation. If multiple valid interpretations exist, return up to 3 distinct queries, each enclosed in triple backticks with sql language tag.
+2. Support MySQL/PostgreSQL syntax
+3. Use proper formatting and indentation
+4. Include comments for complex logic
+5. Optimize for performance
+
+Available database schema:
+${schema}
+
+${previousContext ? `Previous context:\n${previousContext}` : ""}`;
+
+  try {
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: input },
+    ],
+    max_tokens: 2000,
+  });
+
+  const content = response.choices[0]?.message.content;
+  if (typeof content !== "string") return localSqlFallback(input);
+
+  // Extract all SQL blocks
+  const queries = content.match(/```(?:sql)?\s*\n([\s\S]*?)\n```/gi);
+  if (queries) {
+    return queries.map(q => q.replace(/^```(?:sql)?\s*\n|\n```$/gi, "").trim()).filter(Boolean).slice(0, 3);
+  } else {
+    // If no blocks, assume it's a single query directly
+    return content.trim() ? [content.trim()] : localSqlFallback(input);
+  }
+  } catch (error) {
+    console.warn("AI SQL generation unavailable; using local fallback", error);
+    return localSqlFallback(input);
+  }
+}
+
+/**
+ * Generate SQL explanation from a query
+ */
+export async function explainSQLQuery(query: string, schema: string): Promise<string> {
+  const systemPrompt = `You are an expert SQL query explainer. Your task is to explain SQL queries in simple, clear language.
+
+When explaining:
+1. Describe what the query does in plain English
+2. Explain each major clause (SELECT, WHERE, JOIN, GROUP BY, etc.)
+3. Highlight any special operations or optimizations
+4. Note potential performance implications
+5. Keep explanations concise but thorough
+
+Database schema context:
+${schema}`;
+
+  try {
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Explain this SQL query:\n\n${query}` },
+    ],
+    max_tokens: 1500,
+  });
+
+  const content = response.choices[0]?.message.content;
+  return typeof content === "string" && content.trim() ? content : localExplanation(query);
+  } catch (error) {
+    console.warn("AI SQL explanation unavailable; using local explanation", error);
+    return localExplanation(query);
+  }
+}
+
+/**
+ * Analyze query for potential issues and estimate impact
+ */
+export async function analyzeQueryImpact(
+  query: string,
+  schema: string
+): Promise<{
+  warnings: string[];
+  estimatedRows: string;
+  riskLevel: "low" | "medium" | "high";
+  analysis: string;
+}> {
+  const systemPrompt = `You are a SQL query analyzer. Analyze the provided query for potential issues and estimate its impact.
+
+Return a JSON object with:
+{
+  "warnings": ["array of potential issues or risky operations"],
+  "estimatedRows": "estimated number of rows affected/returned",
+  "riskLevel": "low|medium|high",
+  "analysis": "brief analysis of the query impact"
+}
+
+Focus on:
+1. Missing WHERE clauses in UPDATE/DELETE
+2. Potential performance issues
+3. Data loss risks
+4. Locking implications
+
+Database schema:
+${schema}`;
+
+  try {
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Analyze this query:\n\n${query}` },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "query_analysis",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            warnings: {
+              type: "array",
+              items: { type: "string" },
+              description: "Array of warnings or potential issues",
+            },
+            estimatedRows: {
+              type: "string",
+              description: "Estimated number of rows affected",
+            },
+            riskLevel: {
+              type: "string",
+              enum: ["low", "medium", "high"],
+              description: "Risk level of the operation",
+            },
+            analysis: {
+              type: "string",
+              description: "Brief analysis of query impact",
+            },
+          },
+          required: ["warnings", "estimatedRows", "riskLevel", "analysis"],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+
+  try {
+    const content = response.choices[0]?.message.content;
+    if (!content || typeof content !== "string") throw new Error("No response from LLM");
+    return JSON.parse(content);
+  } catch (error) {
+    console.error("Failed to parse query analysis:", error);
+    return localImpact(query);
+  }
+  } catch (error) {
+    console.warn("AI query analysis unavailable; using local analysis", error);
+    return localImpact(query);
+  }
+}
+
+/**
+ * Generate code from natural language
+ */
+export async function generateCode(
+  input: string,
+  language: string,
+  previousContext?: string
+): Promise<string> {
+  const systemPrompt = `You are an expert ${language} programmer. Your task is to generate clean, well-structured code from natural language requirements.
+
+When generating code:
+1. Return ONLY the code, no explanation or markdown
+2. Use best practices and industry standards for ${language}
+3. Include meaningful variable names and comments
+4. Handle edge cases appropriately
+5. Optimize for readability and performance
+
+${previousContext ? `Previous context:\n${previousContext}` : ""}`;
+
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: input },
+    ],
+    max_tokens: 2500,
+  });
+
+  const content = response.choices[0]?.message.content;
+  return typeof content === "string" ? content : "";
+}
+
+/**
+ * Explain code
+ */
+export async function explainCode(code: string, language: string): Promise<string> {
+  const systemPrompt = `You are an expert ${language} code explainer. Your task is to explain code in simple, clear language.
+
+When explaining:
+1. Describe what the code does overall
+2. Break down key sections and their purpose
+3. Explain important algorithms or patterns
+4. Note any potential improvements
+5. Keep explanations concise but thorough`;
+
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Explain this ${language} code:\n\n${code}` },
+    ],
+    max_tokens: 1500,
+  });
+
+  const content = response.choices[0]?.message.content;
+  return typeof content === "string" ? content : "";
+}
+
+/**
+ * Debug code and suggest fixes
+ */
+export async function debugCode(
+  code: string,
+  language: string,
+  errorMessage?: string
+): Promise<{
+  issues: string[];
+  correctedCode: string;
+  explanation: string;
+}> {
+  const systemPrompt = `You are an expert ${language} debugger. Analyze the provided code for errors and suggest fixes.
+
+Return a JSON object with:
+{
+  "issues": ["array of identified issues"],
+  "correctedCode": "fixed version of the code",
+  "explanation": "explanation of the issues and fixes"
+}
+
+Be thorough in identifying:
+1. Syntax errors
+2. Logic errors
+3. Potential runtime exceptions
+4. Best practice violations`;
+
+  const userMessage = errorMessage
+    ? `Debug this ${language} code (error: ${errorMessage}):\n\n${code}`
+    : `Debug this ${language} code:\n\n${code}`;
+
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "code_debug",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            issues: {
+              type: "array",
+              items: { type: "string" },
+              description: "Array of identified issues",
+            },
+            correctedCode: {
+              type: "string",
+              description: "Fixed version of the code",
+            },
+            explanation: {
+              type: "string",
+              description: "Explanation of issues and fixes",
+            },
+          },
+          required: ["issues", "correctedCode", "explanation"],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+
+  try {
+    const content = response.choices[0]?.message.content;
+    if (!content || typeof content !== "string") throw new Error("No response from LLM");
+    return JSON.parse(content);
+  } catch (error) {
+    console.error("Failed to parse debug response:", error);
+    return {
+      issues: ["Unable to debug code"],
+      correctedCode: code,
+      explanation: "Could not parse debug response",
+    };
+  }
+}
+
+/**
+ * Optimize code
+ */
+export async function optimizeCode(code: string, language: string): Promise<string> {
+  const systemPrompt = `You are an expert ${language} code optimizer. Your task is to improve code for performance, readability, and maintainability.
+
+When optimizing:
+1. Return ONLY the optimized code
+2. Preserve the original functionality
+3. Use modern ${language} patterns and features
+4. Improve performance where possible
+5. Enhance code clarity`;
+
+  const response = await invokeLLM({
+    model: "gpt-5-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Optimize this ${language} code:\n\n${code}` },
+    ],
+    max_tokens: 2500,
+  });
+
+  const content = response.choices[0]?.message.content;
+  return typeof content === "string" ? content : "";
+}
