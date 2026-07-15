@@ -22,6 +22,17 @@ import {
 } from "../db";
 import { queryHistory, executionResults } from "../../drizzle/schema";
 import { executeMySqlQuery, inspectMySqlSchema, isTargetDatabaseConfigured } from "../target-database";
+import { optimizeSql, validateSql } from "../sql-analysis";
+
+async function resolveSchema(schemaId?: number, customSchema?: string): Promise<string> {
+  if (customSchema?.trim()) return customSchema;
+  if (schemaId) {
+    const schema = await getSchemaDefinitionById(schemaId);
+    if (schema) return schema.schema;
+  }
+  if (isTargetDatabaseConfigured()) return (await inspectMySqlSchema()).schema;
+  return "";
+}
 
 export const assistantRouter = router({
   /**
@@ -39,7 +50,9 @@ export const assistantRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const statement = input.query.trim();
-      const operation = statement.match(/^(SELECT|INSERT|UPDATE|DELETE)\b/i)?.[1]?.toUpperCase();
+      const operation = /^WITH\b/i.test(statement) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(statement)
+        ? "SELECT"
+        : statement.match(/^(SELECT|INSERT|UPDATE|DELETE)\b/i)?.[1]?.toUpperCase();
       if (!operation || statement.replace(/;\s*$/, "").includes(";")) {
         throw new Error("Only one SELECT, INSERT, UPDATE, or DELETE statement can be executed at a time.");
       }
@@ -115,11 +128,20 @@ export const assistantRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const schema = input.customSchema || (input.schemaId ? await getSchemaDefinitionById(input.schemaId) : null);
-      const discoveredSchema = !schema && isTargetDatabaseConfigured() ? await inspectMySqlSchema() : null;
-      const schemaText = schema ? (typeof schema === "object" ? schema.schema : schema) : (discoveredSchema?.schema ?? "No schema provided");
-
       try {
+        const schema = input.customSchema || (input.schemaId ? await getSchemaDefinitionById(input.schemaId) : null);
+        let schemaText = schema ? (typeof schema === "object" ? schema.schema : schema) : "No schema provided";
+
+        // Schema discovery is helpful, but a database connection problem must
+        // never prevent the assistant from generating a query.
+        if (!schema && isTargetDatabaseConfigured()) {
+          try {
+            schemaText = (await inspectMySqlSchema()).schema;
+          } catch (schemaError) {
+            console.warn("MySQL schema discovery unavailable; generating without it", schemaError);
+          }
+        }
+
         // Create query history record
         const historyRecord = await createQueryHistory({
           userId: ctx.user.id,
@@ -155,7 +177,7 @@ export const assistantRouter = router({
         return { queries, historyId, analysis };
       } catch (error) {
         console.error("SQL generation error:", error);
-        throw new Error("Failed to generate SQL query");
+        throw new Error(error instanceof Error ? error.message : "Failed to generate SQL query");
       }
     }),
 
@@ -167,6 +189,19 @@ export const assistantRouter = router({
     const discovered = await inspectMySqlSchema();
     return { configured: true, ...discovered };
   }),
+
+  /** Validate one SQL statement against the selected or automatically discovered schema. */
+  validateSQL: protectedProcedure
+    .input(z.object({ query: z.string().min(1), schemaId: z.number().optional(), customSchema: z.string().optional() }))
+    .query(async ({ input }) => {
+      const schema = await resolveSchema(input.schemaId, input.customSchema);
+      return validateSql(input.query, schema);
+    }),
+
+  /** Return practical SQL performance recommendations before execution. */
+  optimizeSQL: protectedProcedure
+    .input(z.object({ query: z.string().min(1) }))
+    .query(({ input }) => ({ suggestions: optimizeSql(input.query) })),
 
   /**
    * SQL Query Explanation

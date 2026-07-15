@@ -24,7 +24,10 @@ const blockedSql = /\b(?:ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE|CALL|HANDLER|LO
 
 function prepareStatement(sql: string): { statement: string; operation: "SELECT" | "INSERT" | "UPDATE" | "DELETE" } {
   const statement = sql.trim().replace(/;\s*$/, "");
-  const operation = statement.match(/^(SELECT|INSERT|UPDATE|DELETE)\b/i)?.[1]?.toUpperCase() as "SELECT" | "INSERT" | "UPDATE" | "DELETE" | undefined;
+  const startsWithCte = /^WITH\b/i.test(statement);
+  const operation = (startsWithCte && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(statement)
+    ? "SELECT"
+    : statement.match(/^(SELECT|INSERT|UPDATE|DELETE)\b/i)?.[1]?.toUpperCase()) as "SELECT" | "INSERT" | "UPDATE" | "DELETE" | undefined;
   if (!operation || statement.includes(";") || blockedSql.test(statement)) {
     throw new Error("Only one safe SELECT, INSERT, UPDATE, or DELETE statement can be executed.");
   }

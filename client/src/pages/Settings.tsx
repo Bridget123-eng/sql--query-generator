@@ -1,31 +1,8 @@
-import { useAuth } from "@/_core/hooks/useAuth";
 import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 
 export default function Settings() {
-  const { user } = useAuth();
-
   return (
     <div className="max-w-2xl space-y-6">
-      {/* Profile */}
-      <Card className="p-6 bg-slate-900 border-white border-opacity-10">
-        <h3 className="text-white font-semibold text-lg mb-4">Profile</h3>
-        <div className="space-y-3">
-          <div>
-            <label className="block text-gray-400 text-sm mb-1">Name</label>
-            <div className="text-white">{user?.name || "Not set"}</div>
-          </div>
-          <div>
-            <label className="block text-gray-400 text-sm mb-1">Email</label>
-            <div className="text-white">{user?.email || "Not set"}</div>
-          </div>
-          <div>
-            <label className="block text-gray-400 text-sm mb-1">User ID</label>
-            <div className="text-white font-mono text-sm">{user?.id}</div>
-          </div>
-        </div>
-      </Card>
-
       {/* About */}
       <Card className="p-6 bg-slate-900 border-white border-opacity-10">
         <h3 className="text-white font-semibold text-lg mb-4">About</h3>

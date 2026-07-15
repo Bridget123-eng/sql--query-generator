@@ -1,66 +1,15 @@
-import { useAuth } from "@/_core/hooks/useAuth";
 import { useLocation } from "wouter";
-import { useEffect } from "react";
 import QueryAssistant from "@/pages/QueryAssistant";
 import CodeAssistant from "@/pages/CodeAssistant";
 import QueryHistory from "@/pages/QueryHistory";
 import SchemaManager from "@/pages/SchemaManager";
 import Settings from "@/pages/Settings";
-import { Button } from "@/components/ui/button";
-import { startLogin } from "@/const";
 import { Menu, X } from "lucide-react";
 import { useState } from "react";
 
 export default function Home() {
-  const { user, loading, isAuthenticated, logout } = useAuth();
   const [location, setLocation] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="text-white text-lg">Loading...</div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center relative overflow-hidden">
-        {/* Grid background pattern */}
-        <div className="absolute inset-0 opacity-5">
-          <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="white" strokeWidth="0.5" />
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#grid)" />
-          </svg>
-        </div>
-
-        {/* Technical line decorations */}
-        <div className="absolute top-20 left-10 w-32 h-32 border border-white border-opacity-10"></div>
-        <div className="absolute bottom-20 right-10 w-40 h-40 border border-white border-opacity-10"></div>
-
-        <div className="relative z-10 text-center max-w-2xl px-6">
-          <h1 className="text-5xl font-bold text-white mb-4 tracking-tight">
-            SQL & Code Assistant
-          </h1>
-          <p className="text-xl text-gray-300 mb-8">
-            Transform natural language into optimized SQL queries and code. Powered by advanced AI.
-          </p>
-          <Button
-            onClick={() => startLogin()}
-            size="lg"
-            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-8 py-3"
-          >
-            Sign In to Continue
-          </Button>
-        </div>
-      </div>
-    );
-  }
 
   // Determine current page
   const currentPage = location.split("/")[1] || "query";
@@ -142,18 +91,8 @@ export default function Home() {
           />
         </nav>
 
-        <div className="p-4 border-t border-white border-opacity-10">
-          <div className="text-xs text-gray-400 mb-3">
-            {user?.name || user?.email || "User"}
-          </div>
-          <Button
-            onClick={() => logout()}
-            variant="outline"
-            size="sm"
-            className="w-full text-white border-white border-opacity-30 hover:bg-white hover:bg-opacity-10"
-          >
-            Logout
-          </Button>
+        <div className="p-4 border-t border-white border-opacity-10 text-xs text-gray-400">
+          Local SQL assistant
         </div>
       </aside>
 

@@ -1,10 +1,10 @@
 # SQL & Code Assistant - Project TODO
 
 ## Database Schema
-- [x] Add QueryHistory table (userId, type, input, query, explanation, createdAt, executedAt)
-- [x] Add SchemaDefinition table (userId, name, schema, createdAt, updatedAt)
-- [x] Add CodeSnippet table (userId, input, code, explanation, language, createdAt)
-- [x] Add ExecutionResult table (queryHistoryId, rowsAffected, rowsReturned, result, executedAt, error)
+ [x] Add QueryHistory table (userId, type, input, query, explanation, createdAt, executedAt)
+ [x] Add SchemaDefinition table (userId, name, schema, createdAt, updatedAt)
+ [x] Add CodeSnippet table (userId, input, code, explanation, language, createdAt)
+ [x] Add ExecutionResult table (queryHistoryId, rowsAffected, rowsReturned, result, executedAt, error)
 
 ## Backend APIs - Query Generation & Streaming
 - [x] Create LLM streaming helper for token-by-token output
@@ -14,7 +14,7 @@
 - [x] Build code explanation endpoint with streaming
 - [x] Build code debugging endpoint with streaming
 - [x] Build query impact analyzer (detects risky operations, estimates row counts)
-- [ ] Build query execution endpoint (with safety checks)
+- [x] Build query execution endpoint (with safety checks)
 
 ## Backend APIs - Schema & History Management
 - [x] Build schema upload/paste endpoint (validate and store)
@@ -37,7 +37,7 @@
 - [x] Add query explanation display (streaming)
 - [x] Build impact analyzer display with warnings
 - [x] Add copy/execute buttons
-- [ ] Implement execution results display with row counts
+- [x] Implement execution results display with row counts
 
 ## Frontend - Code Assistant Page
 - [x] Build code language selector
@@ -53,11 +53,11 @@
 - [x] Add search functionality
 - [x] Implement query detail view (full query, explanation, results)
 - [x] Add re-run button for previous queries
-- [ ] Build delete/archive functionality
+- [x] Build delete/archive functionality
 
 ## Frontend - Schema Manager Page
 - [x] Build schema upload interface (paste SQL DDL)
-- [ ] Implement schema preview/validation
+- [x] Implement schema preview/validation
 - [x] Build schema list with edit/delete options
 - [x] Add schema selection for query generation
 - [ ] Implement schema versioning display

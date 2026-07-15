@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useMemo } from "react";
 
 interface CodeHighlightProps {
   code: string;
@@ -7,27 +7,27 @@ interface CodeHighlightProps {
 }
 
 export function CodeHighlight({ code, language = "sql", className = "" }: CodeHighlightProps) {
-  const preRef = useRef<HTMLPreElement>(null);
-
-  useEffect(() => {
-    // Basic syntax highlighting without external library
-    // This is a simple implementation that can be enhanced with Prism.js or highlight.js
-    if (preRef.current) {
-      preRef.current.innerHTML = highlightCode(code, language);
-    }
-  }, [code, language]);
+  const tokens = useMemo(() => highlightCode(code, language), [code, language]);
 
   return (
-    <pre
-      ref={preRef}
-      className={`bg-slate-800 p-4 rounded text-gray-300 text-sm overflow-auto max-h-96 border border-white border-opacity-10 font-mono ${className}`}
-    >
-      {code}
+    <pre className={`bg-slate-800 p-4 rounded text-gray-300 text-sm overflow-auto max-h-96 border border-white border-opacity-10 font-mono ${className}`}>
+      {tokens.map((token, index) =>
+        token.className ? (
+          <span key={index} className={token.className}>{token.value}</span>
+        ) : (
+          token.value
+        )
+      )}
     </pre>
   );
 }
 
-function highlightCode(code: string, language: string): string {
+interface HighlightToken {
+  value: string;
+  className?: string;
+}
+
+function highlightCode(code: string, language: string): HighlightToken[] {
   // SQL keywords
   const sqlKeywords = [
     "SELECT",
@@ -140,42 +140,36 @@ function highlightCode(code: string, language: string): string {
     keywords = jsKeywords;
   }
 
-  let highlighted = code;
-
-  // Escape HTML
-  highlighted = highlighted
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-
-  // Highlight keywords
-  keywords.forEach((keyword) => {
-    const regex = new RegExp(`\\b${keyword}\\b`, "gi");
-    highlighted = highlighted.replace(
-      regex,
-      `<span class="text-blue-400 font-semibold">${keyword}</span>`
-    );
-  });
-
-  // Highlight strings
-  highlighted = highlighted.replace(
-    /(['"`])(?:(?=(\\?))\2.)*?\1/g,
-    '<span class="text-green-400">$&</span>'
+  // Match each original token once. Rendering spans through React ensures
+  // class names can never be interpreted as query text and highlighted again.
+  const keywordPattern = keywords.join("|");
+  const tokenPattern = new RegExp(
+    `(--[^\\n]*|//[^\\n]*|/\\*[\\s\\S]*?\\*/)|((['"\\x60])(?:(?=(\\\\?))\\4.)*?\\3)|\\b(${keywordPattern})\\b|\\b(\\d+(?:\\.\\d+)?)\\b`,
+    "gi"
   );
 
-  // Highlight comments
-  highlighted = highlighted.replace(
-    /(--[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g,
-    '<span class="text-gray-500">$1</span>'
-  );
+  const result: HighlightToken[] = [];
+  let lastIndex = 0;
 
-  // Highlight numbers
-  highlighted = highlighted.replace(
-    /\b(\d+(?:\.\d+)?)\b/g,
-    '<span class="text-yellow-400">$1</span>'
-  );
+  for (const match of code.matchAll(tokenPattern)) {
+    const token = match[0];
+    const index = match.index ?? 0;
+    const plainText = code.slice(lastIndex, index);
+    if (plainText) result.push({ value: plainText });
 
-  return highlighted;
+    const className = match[1]
+      ? "text-gray-500"
+      : match[2]
+        ? "text-green-400"
+        : match[5]
+          ? "text-blue-400 font-semibold"
+          : "text-yellow-400";
+
+    result.push({ value: token, className });
+    lastIndex = index + token.length;
+  }
+
+  const remainingText = code.slice(lastIndex);
+  if (remainingText) result.push({ value: remainingText });
+  return result;
 }

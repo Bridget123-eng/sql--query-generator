@@ -93,7 +93,9 @@ export function localSqlFallback(input: string, schema = ""): string[] {
 }
 
 function isSupportedSql(statement: string): boolean {
-  return /^(SELECT|INSERT|UPDATE|DELETE)\b/i.test(statement.trim());
+  const normalized = statement.trim();
+  return /^(SELECT|INSERT|UPDATE|DELETE)\b/i.test(normalized)
+    || (/^WITH\b/i.test(normalized) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(normalized));
 }
 
 function localExplanation(query: string): string {
@@ -131,15 +133,16 @@ export async function generateSQLQuery(
   schema: string,
   previousContext?: string
 ): Promise<string[]> {
-  const systemPrompt = `You are an expert SQL query generator. Your task is to convert natural language requirements into valid, optimized SQL queries.
+  const systemPrompt = `You are an expert MySQL 8+ query generator. Your task is to convert natural language requirements into valid, optimized MySQL queries.
 
 When generating queries:
 1. Understand ordinary, conversational user requests and return ONLY the SQL query code, no explanation. If multiple valid interpretations exist, return up to 3 distinct queries, each enclosed in triple backticks with sql language tag.
-2. Support MySQL/PostgreSQL syntax
+2. Use MySQL 8+ syntax only. Do not use PostgreSQL-only syntax such as ::date, DATE_TRUNC, QUALIFY, or INTERVAL '6 months'; use CAST(... AS DATE), DATE_FORMAT, a CTE/subquery, and DATE_SUB(CURDATE(), INTERVAL 6 MONTH) instead.
 3. Use proper formatting and indentation
 4. Include comments for complex logic
 5. Optimize for performance
 6. Use the supplied schema exactly when it is available. If no schema is supplied, infer sensible table and column names from the request instead of refusing to generate a query.
+7. Be capable of SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs (including recursive CTEs), window functions, grouping, ranking, date functions, duplicate detection, reporting, and index recommendations. For index recommendations, return the CREATE INDEX statement but clearly do not treat it as a data query.
 
 Available database schema:
 ${schema}

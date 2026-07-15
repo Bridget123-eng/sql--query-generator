@@ -43,6 +43,14 @@ export default function QueryAssistant() {
     },
     { enabled: generatedQueries.length > 0 }
   );
+  const validateQuery = trpc.assistant.validateSQL.useQuery(
+    { query: generatedQueries[selectedQueryIndex] ?? "", schemaId: selectedSchema, customSchema },
+    { enabled: generatedQueries.length > 0 }
+  );
+  const optimizeQuery = trpc.assistant.optimizeSQL.useQuery(
+    { query: generatedQueries[selectedQueryIndex] ?? "" },
+    { enabled: generatedQueries.length > 0 }
+  );
 
   const schemas = trpc.schemas.list.useQuery();
   const databaseSchema = trpc.assistant.inspectMySQLSchema.useQuery();
@@ -68,7 +76,7 @@ export default function QueryAssistant() {
       setWriteConfirmed(false);
       toast.success(`Generated ${result.queries?.length || 1} query option(s)`);
     } catch (error) {
-      toast.error("Failed to generate query");
+      toast.error(error instanceof Error ? error.message : "Failed to generate query");
       console.error(error);
     } finally {
       setLoading(false);
@@ -186,7 +194,7 @@ export default function QueryAssistant() {
       {/* Output Section */}
       {generatedQueries.length > 0 && (
         <Tabs defaultValue="query" className="w-full">
-          <TabsList className="grid w-full grid-cols-4 bg-slate-900 border-b border-white border-opacity-10">
+          <TabsList className="grid w-full grid-cols-5 bg-slate-900 border-b border-white border-opacity-10">
             <TabsTrigger value="query" className="text-white">
               Query
             </TabsTrigger>
@@ -195,6 +203,9 @@ export default function QueryAssistant() {
             </TabsTrigger>
             <TabsTrigger value="impact" className="text-white">
               Impact Analysis
+            </TabsTrigger>
+            <TabsTrigger value="validation" className="text-white">
+              Validate & Optimize
             </TabsTrigger>
             <TabsTrigger value="results" className="text-white">
               Results
@@ -289,6 +300,31 @@ export default function QueryAssistant() {
                 </div>
               ) : (
                 <div className="text-gray-400">No explanation available</div>
+              )}
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="validation" className="space-y-4">
+            <Card className="p-6 bg-slate-900 border-white border-opacity-10">
+              <h3 className="text-white font-semibold mb-4">Query Validation</h3>
+              {validateQuery.isLoading ? <div className="text-gray-400">Checking syntax and schema…</div> : validateQuery.data ? (
+                <div className="space-y-4">
+                  <div className={validateQuery.data.valid ? "text-emerald-300" : "text-red-300"}>
+                    {validateQuery.data.valid ? "Valid for the selected schema" : "Validation issues found"}
+                  </div>
+                  {validateQuery.data.tables.length > 0 && <p className="text-sm text-gray-300">Tables: {validateQuery.data.tables.join(", ")}</p>}
+                  {validateQuery.data.columns.length > 0 && <p className="text-sm text-gray-300">Filtered columns: {validateQuery.data.columns.join(", ")}</p>}
+                  {validateQuery.data.errors.map((item, index) => <p key={`error-${index}`} className="rounded bg-red-950 p-3 text-sm text-red-200">{item}</p>)}
+                  {validateQuery.data.warnings.map((item, index) => <p key={`warning-${index}`} className="rounded bg-amber-950 p-3 text-sm text-amber-200">{item}</p>)}
+                </div>
+              ) : <div className="text-gray-400">No validation result available.</div>}
+            </Card>
+            <Card className="p-6 bg-slate-900 border-white border-opacity-10">
+              <h3 className="text-white font-semibold mb-4">Optimization Suggestions</h3>
+              {optimizeQuery.isLoading ? <div className="text-gray-400">Reviewing query performance…</div> : (
+                <ul className="space-y-2 text-sm text-gray-300">
+                  {optimizeQuery.data?.suggestions.map((item, index) => <li key={index} className="rounded bg-slate-800 p-3">{item}</li>)}
+                </ul>
               )}
             </Card>
           </TabsContent>
