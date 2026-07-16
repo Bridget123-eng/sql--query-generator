@@ -74,6 +74,16 @@ export function localSqlFallback(input: string, schema = ""): string[] {
     return ["-- Please name the table to query, or select/paste a database schema so I can identify it safely."];
   }
 
+  // "Highest ... in each department" is a grouped ranking request, not a
+  // department filter. The join keeps every employee tied for the top salary.
+  const highestSalaryPerDepartment = /\b(?:employees?|staff)\b[\s\S]*?\bhighest\s+salary\b[\s\S]*?\b(?:in|for)\s+each\s+department\b/i.test(prompt)
+    || /\bhighest\s+salary\b[\s\S]*?\b(?:in|for)\s+each\s+department\b/i.test(prompt);
+  if (highestSalaryPerDepartment) {
+    return [
+      `SELECT e.*\nFROM ${table} AS e\nINNER JOIN (\n  SELECT department, MAX(salary) AS highest_salary\n  FROM ${table}\n  GROUP BY department\n) AS department_max\n  ON department_max.department = e.department\n AND department_max.highest_salary = e.salary;`,
+    ];
+  }
+
   const filter = extractFilter(prompt);
   const limit = prompt.match(/\b(?:top|first|limit)\s+(\d+)/i)?.[1];
   const sort = prompt.match(/\b(?:highest|largest|most)\s+([a-zA-Z_]\w*)/i)?.[1]
@@ -121,6 +131,22 @@ function isSafeGeneratedSql(statement: string, schema: string): boolean {
 
 function isUsableFallback(queries: string[]): boolean {
   return queries.length > 0 && !queries[0].trim().startsWith("--");
+}
+
+/**
+ * Use the rule-based parser only when it can represent the entire request.
+ * Sending a complex request to that parser used to silently discard intent
+ * (for example, grouping or date conditions) and produce a generic query.
+ */
+function shouldUseLocalSqlFallback(input: string, queries: string[]): boolean {
+  if (!isUsableFallback(queries)) return false;
+  const prompt = input.toLowerCase();
+  if (/\bhighest\s+salary\b[\s\S]*?\b(?:in|for)\s+each\s+department\b/.test(prompt)) return true;
+
+  const unsupportedIntent = /\b(?:each|per|group(?:ed|ing)?|average|avg|sum|total|join|between|last|next|today|yesterday|month|year|date|duplicate|unique|project|rank|percentile|window)\b/;
+  if (unsupportedIntent.test(prompt)) return false;
+
+  return /\b(?:show|list|find|get|display|retrieve|count|how many|number of|delete|remove|increase|raise|update|change|set)\b/.test(prompt);
 }
 
 export function localExplanation(query: string): string {
@@ -171,14 +197,14 @@ export async function generateSQLQuery(
   // than by a small local model. This also guarantees predictable SQL for
   // filters, counts, rankings, sorting, and simple updates.
   const fallback = localSqlFallback(input, schema);
-  if (isUsableFallback(fallback)) return fallback;
+  if (shouldUseLocalSqlFallback(input, fallback)) return fallback;
 
   const systemPrompt = `You are an expert MySQL 8+ query generator. Your task is to convert natural language requirements into valid, optimized MySQL queries.
 
 When generating queries:
-1. Understand ordinary, conversational user requests and return EXACTLY ONE valid SQL statement. Return SQL only: no explanation, markdown fences, comments, or alternative queries.
+1. Understand ordinary, conversational user requests and return EXACTLY ONE valid SQL statement that answers every part of the request. Return SQL only: no explanation, markdown fences, comments, or alternative queries.
 2. Use MySQL 8+ syntax only. Do not use PostgreSQL-only syntax such as ::date, DATE_TRUNC, QUALIFY, or INTERVAL '6 months'; use CAST(... AS DATE), DATE_FORMAT, a CTE/subquery, and DATE_SUB(CURDATE(), INTERVAL 6 MONTH) instead.
-3. Use proper formatting and indentation. Prefer explicit columns, selective WHERE clauses, and LIMIT for exploratory SELECT queries when the request does not ask for every row.
+3. Use proper formatting and indentation. Prefer explicit columns, selective WHERE clauses, and LIMIT for exploratory SELECT queries when the request does not ask for every row. For requests such as "highest salary in each department", use GROUP BY with MAX or a MySQL 8 window function, never a filter such as department = 'each'.
 4. Use the supplied schema exactly when it is available. Never use a table or column that is not in the schema. Never interpret ranking words such as "second", "highest", or "distinct" as table or column names. If no schema is supplied and the request does not explicitly name a table, return no SQL.
 7. Be capable of SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs (including recursive CTEs), window functions, grouping, ranking, date functions, duplicate detection, reporting, and index recommendations. For index recommendations, return the CREATE INDEX statement but clearly do not treat it as a data query.
 

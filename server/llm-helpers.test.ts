@@ -154,6 +154,17 @@ describe("LLM Helpers", () => {
       expect(query).toContain("FROM employees");
     });
 
+    it("returns the highest-paid employee or employees in every department", () => {
+      const [query] = localSqlFallback(
+        "Find employees having the highest salary in each department",
+        "CREATE TABLE employees (id INT, department VARCHAR(100), salary DECIMAL(10,2));"
+      );
+      expect(query).toContain("MAX(salary)");
+      expect(query).toContain("GROUP BY department");
+      expect(query).toContain("department_max.highest_salary = e.salary");
+      expect(query).not.toContain("Department = 'each'");
+    });
+
     it("does not mistake ranking words for table names", () => {
       const [query] = localSqlFallback("Find the second highest distinct salary");
       expect(query).toContain("Please name the table");
