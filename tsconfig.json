@@ -33,5 +33,12 @@
     "allowImportingTsExtensions": true,
 
     "types": ["node"],
+
+    "baseUrl": ".",
+
+    "paths": {
+      "@/*": ["client/src/*"],
+      "@shared/*": ["shared/*"]
+    }
   }
 }
