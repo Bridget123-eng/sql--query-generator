@@ -1,5 +1,6 @@
 import { invokeLLM } from "./_core/llm";
 import { ENV } from "./_core/env";
+import { validateSql } from "./sql-analysis";
 
 type QueryImpact = {
   warnings: string[];
@@ -114,6 +115,14 @@ function isSupportedSql(statement: string): boolean {
     || (/^WITH\b/i.test(normalized) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(normalized));
 }
 
+function isSafeGeneratedSql(statement: string, schema: string): boolean {
+  return isSupportedSql(statement) && validateSql(statement, schema).valid;
+}
+
+function isUsableFallback(queries: string[]): boolean {
+  return queries.length > 0 && !queries[0].trim().startsWith("--");
+}
+
 export function localExplanation(query: string): string {
   const operation = query.trim().match(/^(SELECT|INSERT|UPDATE|DELETE)/i)?.[1]?.toUpperCase();
   const tables = [...query.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+([`"\w.]+)/gi)].map((match) => match[1].replace(/[`"]+/g, ""));
@@ -158,15 +167,19 @@ export async function generateSQLQuery(
   schema: string,
   previousContext?: string
 ): Promise<string[]> {
+  // Common requests are more accurately handled by the deterministic parser
+  // than by a small local model. This also guarantees predictable SQL for
+  // filters, counts, rankings, sorting, and simple updates.
+  const fallback = localSqlFallback(input, schema);
+  if (isUsableFallback(fallback)) return fallback;
+
   const systemPrompt = `You are an expert MySQL 8+ query generator. Your task is to convert natural language requirements into valid, optimized MySQL queries.
 
 When generating queries:
-1. Understand ordinary, conversational user requests and return EXACTLY TWO valid SQL alternatives, no explanation. Put each alternative in its own triple-backtick sql block. Option 1 should be the clearest query; option 2 must be a genuinely equivalent or meaningfully optimized alternative. Never repeat the same statement.
+1. Understand ordinary, conversational user requests and return EXACTLY ONE valid SQL statement. Return SQL only: no explanation, markdown fences, comments, or alternative queries.
 2. Use MySQL 8+ syntax only. Do not use PostgreSQL-only syntax such as ::date, DATE_TRUNC, QUALIFY, or INTERVAL '6 months'; use CAST(... AS DATE), DATE_FORMAT, a CTE/subquery, and DATE_SUB(CURDATE(), INTERVAL 6 MONTH) instead.
-3. Use proper formatting and indentation
-4. Include comments for complex logic
-5. Optimize for performance
-6. Use the supplied schema exactly when it is available. Never interpret ranking words such as "second", "highest", or "distinct" as table or column names. If no schema is supplied and the request does not explicitly name a table, ask for a schema or table name rather than inventing one.
+3. Use proper formatting and indentation. Prefer explicit columns, selective WHERE clauses, and LIMIT for exploratory SELECT queries when the request does not ask for every row.
+4. Use the supplied schema exactly when it is available. Never use a table or column that is not in the schema. Never interpret ranking words such as "second", "highest", or "distinct" as table or column names. If no schema is supplied and the request does not explicitly name a table, return no SQL.
 7. Be capable of SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs (including recursive CTEs), window functions, grouping, ranking, date functions, duplicate detection, reporting, and index recommendations. For index recommendations, return the CREATE INDEX statement but clearly do not treat it as a data query.
 
 Available database schema:
@@ -181,24 +194,24 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
       { role: "system", content: systemPrompt },
       { role: "user", content: input },
     ],
-    max_tokens: 128,
+    max_tokens: 256,
   });
 
   const content = response.choices[0]?.message.content;
-  if (typeof content !== "string") return localSqlFallback(input, schema);
+  if (typeof content !== "string") return fallback;
 
   // Extract all SQL blocks
   const queries = content.match(/```(?:sql)?\s*\n([\s\S]*?)\n```/gi);
   if (queries) {
     const extracted = queries
       .map(q => q.replace(/^```(?:sql)?\s*\n|\n```$/gi, "").trim())
-      .filter(isSupportedSql)
-      .slice(0, 2);
-    return extracted.length ? extracted : localSqlFallback(input, schema);
+      .filter(query => isSafeGeneratedSql(query, schema))
+      .slice(0, 1);
+    return extracted.length ? extracted : fallback;
   } else {
     // A provider can return a prose refusal or an error message. Never show it
     // as though it were executable SQL.
-    return isSupportedSql(content) ? [content.trim()] : localSqlFallback(input, schema);
+    return isSafeGeneratedSql(content, schema) ? [content.trim()] : fallback;
   }
   } catch (error) {
     console.error("Ollama SQL generation failed", error);
