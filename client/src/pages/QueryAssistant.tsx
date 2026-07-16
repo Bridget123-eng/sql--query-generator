@@ -70,7 +70,7 @@ export default function QueryAssistant() {
       });
       setGeneratedQueries(result.queries || []);
       setSelectedQueryIndex(0);
-      setHistoryId(result.historyId);
+      setHistoryId(undefined);
       setAnalysis(result.analysis);
       setExecutionResults(null);
       setWriteConfirmed(false);
@@ -102,9 +102,11 @@ export default function QueryAssistant() {
         schemaId: selectedSchema,
         customSchema: customSchema || undefined,
         queryHistoryId: historyId,
+        prompt,
         isReadOnly: !isWrite,
       });
       setExecutionResults(result);
+      setHistoryId(result.historyId);
       toast.success(result.simulated ? "Query validation preview complete" : "Query executed successfully");
     } catch (error) {
       toast.error("Failed to execute query");
@@ -125,6 +127,12 @@ export default function QueryAssistant() {
   const isWriteQuery = /^(INSERT|UPDATE|DELETE)\b/i.test(currentQuery.trim());
   const tablesInvolved = Array.from(
     new Set(Array.from(currentQuery.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+([`"\w.]+)/gi), (match) => match[1].replace(/[`"]+/g, "")))
+  );
+  const attributesInvolved = Array.from(
+    new Set([
+      ...(currentQuery.match(/^\s*SELECT\s+([\s\S]*?)\s+FROM\b/i)?.[1]?.split(",") ?? []),
+      ...Array.from(currentQuery.matchAll(/\b(?:WHERE|ON|SET|ORDER\s+BY|GROUP\s+BY)\s+([`"\w.]+)/gi), (match) => match[1]),
+    ].map(attribute => attribute.trim()).filter(attribute => attribute && attribute !== "*"))
   );
 
   return (
@@ -284,6 +292,12 @@ export default function QueryAssistant() {
                     </div>
                   </div>
                 </div>
+              </Card>
+            )}
+            {attributesInvolved.length > 0 && (
+              <Card className="p-4 bg-slate-900 border-white border-opacity-10">
+                <div className="text-white font-semibold">Attributes Involved</div>
+                <div className="text-gray-300 text-sm mt-1">{attributesInvolved.join(", ")}</div>
               </Card>
             )}
           </TabsContent>

@@ -10,6 +10,7 @@ import { useState } from "react";
 export default function Home() {
   const [location, setLocation] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [newQueryKey, setNewQueryKey] = useState(0);
 
   // Determine current page
   const currentPage = location.split("/")[1] || "query";
@@ -17,7 +18,7 @@ export default function Home() {
   const renderContent = () => {
     switch (currentPage) {
       case "query":
-        return <QueryAssistant />;
+        return <QueryAssistant key={newQueryKey} />;
       case "code":
         return <CodeAssistant />;
       case "history":
@@ -61,8 +62,8 @@ export default function Home() {
             label="New Query"
             isActive={currentPage === "query"}
             onClick={() => {
+              setNewQueryKey(value => value + 1);
               setLocation("/query");
-              setSidebarOpen(false);
             }}
           />
           <SidebarItem
@@ -70,7 +71,6 @@ export default function Home() {
             isActive={currentPage === "history"}
             onClick={() => {
               setLocation("/history");
-              setSidebarOpen(false);
             }}
           />
           <SidebarItem
@@ -78,7 +78,6 @@ export default function Home() {
             isActive={currentPage === "schemas"}
             onClick={() => {
               setLocation("/schemas");
-              setSidebarOpen(false);
             }}
           />
           <SidebarItem
@@ -86,7 +85,6 @@ export default function Home() {
             isActive={currentPage === "settings"}
             onClick={() => {
               setLocation("/settings");
-              setSidebarOpen(false);
             }}
           />
         </nav>

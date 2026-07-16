@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc, isNotNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   InsertUser,
@@ -132,7 +132,7 @@ export async function getQueryHistoryByUserId(userId: number, limit = 50) {
   return await db
     .select()
     .from(queryHistory)
-    .where(eq(queryHistory.userId, userId))
+    .where(and(eq(queryHistory.userId, userId), isNotNull(queryHistory.executedAt)))
     .orderBy((t) => desc(t.createdAt))
     .limit(limit);
 }

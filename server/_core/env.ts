@@ -6,7 +6,10 @@ export const ENV = {
   isProduction: process.env.NODE_ENV === "production",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
-  llmApiKey: process.env.GEMINI_API_KEY ?? "",
-  llmModel: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+  ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
+  llmModel: process.env.OLLAMA_MODEL ?? "qwen2.5-coder:1.5b",
+  ollamaMaxTokens: Number(process.env.OLLAMA_MAX_TOKENS ?? 512),
+  ollamaTimeoutMs: Number(process.env.OLLAMA_TIMEOUT_MS ?? 120_000),
+  ollamaAuxiliaryAi: process.env.OLLAMA_AUXILIARY_AI === "true",
   targetDatabaseUrl: process.env.TARGET_DATABASE_URL ?? "",
 };

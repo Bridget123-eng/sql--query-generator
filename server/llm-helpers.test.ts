@@ -137,6 +137,27 @@ describe("LLM Helpers", () => {
       expect(query).toContain("SET salary = salary * 1.1000");
       expect(query).toContain("WHERE Department = 'IT'");
     });
+
+    it("generates a ranked distinct salary query from a single-table schema", () => {
+      const [query] = localSqlFallback(
+        "Find the second highest distinct salary",
+        "CREATE TABLE employees (id INT, salary DECIMAL(10,2));"
+      );
+      expect(query).toBe("SELECT DISTINCT salary\nFROM employees\nORDER BY salary DESC\nLIMIT 1 OFFSET 1;");
+    });
+
+    it("uses the unique salary column in a multi-table schema", () => {
+      const [query] = localSqlFallback(
+        "Find the second highest distinct salary",
+        "CREATE TABLE departments (id INT, name VARCHAR(100));\nCREATE TABLE employees (id INT, salary DECIMAL(10,2));"
+      );
+      expect(query).toContain("FROM employees");
+    });
+
+    it("does not mistake ranking words for table names", () => {
+      const [query] = localSqlFallback("Find the second highest distinct salary");
+      expect(query).toContain("Please name the table");
+    });
   });
 
   describe("explainSQLQuery", () => {

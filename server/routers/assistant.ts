@@ -45,10 +45,12 @@ export const assistantRouter = router({
         schemaId: z.number().optional(),
         customSchema: z.string().optional(),
         queryHistoryId: z.number().optional(),
+        prompt: z.string().optional(),
         isReadOnly: z.boolean().default(true), // Safety flag
       })
     )
     .mutation(async ({ ctx, input }) => {
+      let historyId = input.queryHistoryId;
       const statement = input.query.trim();
       const operation = /^WITH\b/i.test(statement) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(statement)
         ? "SELECT"
@@ -58,6 +60,14 @@ export const assistantRouter = router({
       }
       if (input.isReadOnly && operation !== "SELECT") {
         throw new Error("Write queries require explicit confirmation before execution.");
+      }
+
+      // Do not let a generated query reach MySQL until its referenced table and
+      // columns have been checked against the active schema.
+      const schema = await resolveSchema(input.schemaId, input.customSchema);
+      const validation = validateSql(statement, schema);
+      if (!validation.valid) {
+        throw new Error(`Query validation failed: ${validation.errors.join(" ")}`);
       }
 
       try {
@@ -87,31 +97,47 @@ export const assistantRouter = router({
         }
         if (simulated) executionTimeMs = Date.now() - startedAt;
 
-        // Record execution result
-        if (input.queryHistoryId) {
+        // Create history only when the query is actually executed, not when it
+        // is merely generated. This keeps Query History focused on executions.
+        if (!historyId) {
+          const historyRecord = await createQueryHistory({
+            userId: ctx.user.id,
+            type: "sql",
+            input: input.prompt?.trim() || statement,
+            schemaId: input.schemaId,
+          });
+          historyId = (historyRecord as any)?.insertId || undefined;
+        }
+        if (historyId) {
           await createExecutionResult({
-            queryHistoryId: input.queryHistoryId,
+            queryHistoryId: historyId,
             rowsAffected,
             rowsReturned,
             result: result ? JSON.stringify(result) : undefined,
            error: error ?? undefined,
           });
-          await updateQueryHistory(input.queryHistoryId, { executedAt: new Date() });
+          await updateQueryHistory(historyId, {
+            query: statement,
+            executedAt: new Date(),
+            tablesInvolved: Array.from(new Set(Array.from(statement.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+([`"\w.]+)/gi), match => match[1].replace(/[`"]+/g, "")))).join(", "),
+            affectedRows: rowsAffected,
+            returnedRows: rowsReturned,
+          });
         }
 
-        return { rowsAffected, rowsReturned, result, error, simulated, executionTimeMs };
+        return { rowsAffected, rowsReturned, result, error, simulated, executionTimeMs, historyId };
       } catch (e: any) {
         console.error("SQL execution error:", e);
         const errorMessage = e.message || "Failed to execute query";
-        if (input.queryHistoryId) {
+        if (historyId) {
           await createExecutionResult({
-            queryHistoryId: input.queryHistoryId,
+            queryHistoryId: historyId,
             rowsAffected: 0,
             rowsReturned: 0,
           result: undefined,
             error: errorMessage,
           });
-          await updateQueryHistory(input.queryHistoryId, { executedAt: new Date() });
+          await updateQueryHistory(historyId, { executedAt: new Date() });
         }
         throw new Error(errorMessage);
       }
@@ -142,16 +168,6 @@ export const assistantRouter = router({
           }
         }
 
-        // Create query history record
-        const historyRecord = await createQueryHistory({
-          userId: ctx.user.id,
-          type: "sql",
-          input: input.prompt,
-          schemaId: input.schemaId,
-        });
-
-        const historyId = (historyRecord as any)?.insertId || 0;
-
         // Generate SQL query
         const queries = await generateSQLQuery(input.prompt, schemaText);
 
@@ -163,18 +179,7 @@ export const assistantRouter = router({
         const tablesInvolvedMatch = primaryQuery.match(/(?:FROM|JOIN)\s+([`"\w\d\.]+)/gi);
         const tablesInvolved = tablesInvolvedMatch ? Array.from(new Set(tablesInvolvedMatch.map(m => m.split(/\s+/)[1].replace(/[`"']/g, "")))).join(", ") : "Unknown";
 
-        // Update history with generated queries and initial analysis
-        if (historyId) {
-          await updateQueryHistory(historyId, {
-            query: JSON.stringify(queries),
-            explanation: analysis.analysis, // Use analysis as initial explanation
-            tablesInvolved: tablesInvolved,
-            affectedRows: parseInt(analysis.estimatedRows) || 0,
-            returnedRows: parseInt(analysis.estimatedRows) || 0, // Assuming for SELECT, estimatedRows is returnedRows
-          });
-        }
-
-        return { queries, historyId, analysis };
+        return { queries, analysis };
       } catch (error) {
         console.error("SQL generation error:", error);
         throw new Error(error instanceof Error ? error.message : "Failed to generate SQL query");

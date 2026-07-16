@@ -8,7 +8,11 @@ type QueryImpact = {
   analysis: string;
 };
 
-const reservedWords = new Set(["all", "the", "a", "an", "records", "record", "data", "details", "whose", "where", "with"]);
+const reservedWords = new Set([
+  "all", "the", "a", "an", "records", "record", "data", "details", "whose", "where", "with",
+  "first", "second", "third", "top", "highest", "lowest", "largest", "smallest", "distinct",
+  "salary", "result", "results",
+]);
 
 function identifier(value: string): string | undefined {
   const cleaned = value.replace(/[^a-zA-Z0-9_]/g, "");
@@ -22,13 +26,19 @@ function extractTable(prompt: string, schema: string): string | undefined {
     ?? prompt.match(/\b(?:show|list|find|get|display|retrieve|delete|remove|update|change|add)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z_]\w*)/i)?.[1]
     ?? prompt.match(/\b(?:how many|count|number of)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z_]\w*)/i)?.[1];
   const requested = identifier(fromPrompt ?? "");
-  if (!requested) return undefined;
-
   const schemaTables = [...schema.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?([a-zA-Z_]\w*)/gi)].map(match => match[1]);
+  if (!requested) return schemaTables.length === 1 ? schemaTables[0] : undefined;
   const normalized = requested.toLowerCase().replace(/s$/, "");
   return schemaTables.find(table => table.toLowerCase() === requested.toLowerCase())
     ?? schemaTables.find(table => table.toLowerCase().replace(/s$/, "") === normalized)
     ?? requested;
+}
+
+function findTableContainingColumn(schema: string, column: string): string | undefined {
+  const matches = [...schema.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?([a-zA-Z_]\w*)[`"]?\s*\(([\s\S]*?)\);/gi)]
+    .filter(([, , definition]) => new RegExp(`\\b[\\\`\"]?${column}[\\\`\"]?\\s+`, "i").test(definition))
+    .map(([, table]) => table);
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function quoteValue(value: string): string {
@@ -56,7 +66,9 @@ function extractFilter(prompt: string): string | undefined {
  */
 export function localSqlFallback(input: string, schema = ""): string[] {
   const prompt = input.replace(/[\u20b9,$]/g, "").replace(/,/g, "").replace(/\s+/g, " ").trim();
-  const table = extractTable(prompt, schema);
+  const isSecondHighestSalary = /\bsecond\s+(?:highest|largest)\s+(?:distinct\s+)?salary\b/i.test(prompt);
+  const table = extractTable(prompt, schema)
+    ?? (isSecondHighestSalary ? findTableContainingColumn(schema, "salary") : undefined);
   if (!table) {
     return ["-- Please name the table to query, or select/paste a database schema so I can identify it safely."];
   }
@@ -85,6 +97,10 @@ export function localSqlFallback(input: string, schema = ""): string[] {
     return [`SELECT COUNT(*) AS total\nFROM ${table}${filter ? `\nWHERE ${filter}` : ""};`];
   }
 
+  if (isSecondHighestSalary) {
+    return [`SELECT DISTINCT salary\nFROM ${table}\nORDER BY salary DESC\nLIMIT 1 OFFSET 1;`];
+  }
+
   const query = [`SELECT *`, `FROM ${table}`];
   if (filter) query.push(`WHERE ${filter}`);
   if (sort) query.push(`ORDER BY ${sort} ${descending ? "DESC" : "ASC"}`);
@@ -98,20 +114,25 @@ function isSupportedSql(statement: string): boolean {
     || (/^WITH\b/i.test(normalized) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(normalized));
 }
 
-function localExplanation(query: string): string {
+export function localExplanation(query: string): string {
   const operation = query.trim().match(/^(SELECT|INSERT|UPDATE|DELETE)/i)?.[1]?.toUpperCase();
   const tables = [...query.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+([`"\w.]+)/gi)].map((match) => match[1].replace(/[`"]+/g, ""));
-  const where = /\bWHERE\b/i.test(query);
+  const selectList = query.match(/^\s*SELECT\s+([\s\S]*?)\s+FROM\b/i)?.[1]?.trim();
+  const whereClause = query.match(/\bWHERE\s+([\s\S]*?)(?=\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT)\b|;?$)/i)?.[1]?.trim();
+  const orderBy = query.match(/\bORDER\s+BY\s+([\s\S]*?)(?=\bLIMIT\b|;?$)/i)?.[1]?.trim();
   const limit = query.match(/\bLIMIT\s+(\d+)/i)?.[1];
   const tableText = tables.length ? `It uses ${tables.join(", ")}.` : "It does not identify a table.";
-  if (operation === "SELECT") return `Returns matching records. ${tableText} ${where ? "The WHERE clause filters the rows." : "No WHERE clause is applied."}${limit ? ` LIMIT restricts the response to ${limit} row(s).` : ""}`;
-  if (operation === "UPDATE") return `Changes existing records. ${tableText} ${where ? "The WHERE clause limits which rows are updated." : "There is no WHERE clause, so every row may be updated."}`;
-  if (operation === "DELETE") return `Removes records. ${tableText} ${where ? "The WHERE clause limits which rows are removed." : "There is no WHERE clause, so every row may be removed."}`;
+  if (operation === "SELECT") {
+    const attributes = !selectList || selectList === "*" ? "all available columns" : `the selected attributes: ${selectList}`;
+    return `Returns ${attributes} from ${tables.join(", ") || "the source table"}. ${whereClause ? `It filters rows where ${whereClause}.` : "It does not apply a row filter."}${orderBy ? ` Results are sorted by ${orderBy}.` : ""}${limit ? ` It returns at most ${limit} row(s).` : ""}`;
+  }
+  if (operation === "UPDATE") return `Updates records in ${tables.join(", ") || "the target table"}. ${whereClause ? `Only rows where ${whereClause} are changed.` : "There is no WHERE clause, so every row may be updated."}`;
+  if (operation === "DELETE") return `Deletes records from ${tables.join(", ") || "the target table"}. ${whereClause ? `Only rows where ${whereClause} are removed.` : "There is no WHERE clause, so every row may be removed."}`;
   if (operation === "INSERT") return `Adds new record(s). ${tableText}`;
   return "The generated text is not a recognized SQL statement.";
 }
 
-function localImpact(query: string): QueryImpact {
+export function localImpact(query: string): QueryImpact {
   const operation = query.trim().match(/^(SELECT|INSERT|UPDATE|DELETE)/i)?.[1]?.toUpperCase();
   const hasWhere = /\bWHERE\b/i.test(query);
   const limit = query.match(/\bLIMIT\s+(\d+)/i)?.[1];
@@ -122,6 +143,10 @@ function localImpact(query: string): QueryImpact {
   if (operation === "INSERT") return { warnings: [], estimatedRows: "1 or more rows", riskLevel: "medium", analysis: "This inserts data. Verify required columns and constraints first." };
   if (operation === "SELECT") return { warnings: hasWhere ? [] : ["No WHERE clause may return a large result set."], estimatedRows: limit ? `${limit} rows at most` : "Depends on the table size and filters", riskLevel: hasWhere || limit ? "low" : "medium", analysis: "Read-only query; no database records will be changed." };
   return { warnings: ["The SQL statement could not be validated."], estimatedRows: "Unknown", riskLevel: "high", analysis: "Only SELECT, INSERT, UPDATE, and DELETE statements are supported." };
+}
+
+function parseJsonResponse(content: string): unknown {
+  return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, ""));
 }
 
 /**
@@ -136,12 +161,12 @@ export async function generateSQLQuery(
   const systemPrompt = `You are an expert MySQL 8+ query generator. Your task is to convert natural language requirements into valid, optimized MySQL queries.
 
 When generating queries:
-1. Understand ordinary, conversational user requests and return ONLY the SQL query code, no explanation. If multiple valid interpretations exist, return up to 3 distinct queries, each enclosed in triple backticks with sql language tag.
+1. Understand ordinary, conversational user requests and return EXACTLY TWO valid SQL alternatives, no explanation. Put each alternative in its own triple-backtick sql block. Option 1 should be the clearest query; option 2 must be a genuinely equivalent or meaningfully optimized alternative. Never repeat the same statement.
 2. Use MySQL 8+ syntax only. Do not use PostgreSQL-only syntax such as ::date, DATE_TRUNC, QUALIFY, or INTERVAL '6 months'; use CAST(... AS DATE), DATE_FORMAT, a CTE/subquery, and DATE_SUB(CURDATE(), INTERVAL 6 MONTH) instead.
 3. Use proper formatting and indentation
 4. Include comments for complex logic
 5. Optimize for performance
-6. Use the supplied schema exactly when it is available. If no schema is supplied, infer sensible table and column names from the request instead of refusing to generate a query.
+6. Use the supplied schema exactly when it is available. Never interpret ranking words such as "second", "highest", or "distinct" as table or column names. If no schema is supplied and the request does not explicitly name a table, ask for a schema or table name rather than inventing one.
 7. Be capable of SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs (including recursive CTEs), window functions, grouping, ranking, date functions, duplicate detection, reporting, and index recommendations. For index recommendations, return the CREATE INDEX statement but clearly do not treat it as a data query.
 
 Available database schema:
@@ -156,7 +181,7 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
       { role: "system", content: systemPrompt },
       { role: "user", content: input },
     ],
-    max_tokens: 2000,
+    max_tokens: 128,
   });
 
   const content = response.choices[0]?.message.content;
@@ -168,7 +193,7 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
     const extracted = queries
       .map(q => q.replace(/^```(?:sql)?\s*\n|\n```$/gi, "").trim())
       .filter(isSupportedSql)
-      .slice(0, 3);
+      .slice(0, 2);
     return extracted.length ? extracted : localSqlFallback(input, schema);
   } else {
     // A provider can return a prose refusal or an error message. Never show it
@@ -176,8 +201,8 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
     return isSupportedSql(content) ? [content.trim()] : localSqlFallback(input, schema);
   }
   } catch (error) {
-    console.warn("AI SQL generation unavailable; using local fallback", error);
-    return localSqlFallback(input, schema);
+    console.error("Ollama SQL generation failed", error);
+    throw new Error("Ollama could not generate the SQL query. Confirm that Ollama is running and the selected model is loaded.");
   }
 }
 
@@ -185,6 +210,7 @@ ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
  * Generate SQL explanation from a query
  */
 export async function explainSQLQuery(query: string, schema: string): Promise<string> {
+  if (!ENV.ollamaAuxiliaryAi) return localExplanation(query);
   const systemPrompt = `You are an expert SQL query explainer. Your task is to explain SQL queries in simple, clear language.
 
 When explaining:
@@ -227,6 +253,7 @@ export async function analyzeQueryImpact(
   riskLevel: "low" | "medium" | "high";
   analysis: string;
 }> {
+  if (!ENV.ollamaAuxiliaryAi) return localImpact(query);
   const systemPrompt = `You are a SQL query analyzer. Analyze the provided query for potential issues and estimate its impact.
 
 Return a JSON object with:
@@ -290,7 +317,7 @@ ${schema}`;
   try {
     const content = response.choices[0]?.message.content;
     if (!content || typeof content !== "string") throw new Error("No response from LLM");
-    return JSON.parse(content);
+    return parseJsonResponse(content) as QueryImpact;
   } catch (error) {
     console.error("Failed to parse query analysis:", error);
     return localImpact(query);
@@ -428,7 +455,11 @@ Be thorough in identifying:
   try {
     const content = response.choices[0]?.message.content;
     if (!content || typeof content !== "string") throw new Error("No response from LLM");
-    return JSON.parse(content);
+    return parseJsonResponse(content) as {
+      issues: string[];
+      correctedCode: string;
+      explanation: string;
+    };
   } catch (error) {
     console.error("Failed to parse debug response:", error);
     return {
