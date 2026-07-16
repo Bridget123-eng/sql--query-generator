@@ -457,11 +457,7 @@ export default function QueryAssistant() {
                 {executionResults.result && (
                   <Card className="p-6 bg-slate-900 border-white border-opacity-10">
                     <h3 className="text-white font-semibold mb-4">Result Data</h3>
-                    <div className="overflow-x-auto">
-                      <pre className="text-gray-300 text-sm bg-slate-800 p-4 rounded overflow-auto max-h-96">
-                        {JSON.stringify(executionResults.result, null, 2)}
-                      </pre>
-                    </div>
+                    <ResultsTable data={executionResults.result} />
                   </Card>
                 )}
               </>
@@ -480,4 +476,42 @@ export default function QueryAssistant() {
       )}
     </div>
   );
+}
+
+function ResultsTable({ data }: { data: unknown }) {
+  const sourceRows = Array.isArray(data) ? data : [data];
+  const rows: Record<string, unknown>[] = sourceRows.map((row): Record<string, unknown> =>
+    row !== null && typeof row === "object" && !Array.isArray(row)
+      ? (row as Record<string, unknown>)
+      : { value: row }
+  );
+  const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+
+  if (columns.length === 0) {
+    return <p className="rounded border border-slate-700 bg-slate-950 p-4 text-sm text-slate-400">The query completed without result data.</p>;
+  }
+
+  return (
+    <div className="max-h-96 overflow-auto rounded-md border border-slate-700">
+      <table className="w-full min-w-max border-collapse text-left text-sm">
+        <thead className="sticky top-0 bg-slate-800 text-slate-300">
+          <tr>{columns.map((column) => <th key={column} className="border-b border-slate-700 px-4 py-3 font-semibold">{column}</th>)}</tr>
+        </thead>
+        <tbody className="divide-y divide-slate-800 bg-slate-950 text-slate-100">
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex} className="transition-colors hover:bg-slate-900">
+              {columns.map((column) => <td key={column} className="max-w-md whitespace-nowrap px-4 py-3 align-top">{formatCell(row[column])}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (value instanceof Date) return value.toLocaleString();
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
