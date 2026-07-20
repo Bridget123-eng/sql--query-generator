@@ -8,13 +8,14 @@ import {
   debugCode,
   optimizeCode,
   localSqlFallback,
+  SqlResult
 } from "./llm-helpers";
 
 // Mock the invokeLLM function
 vi.mock("./_core/llm", () => ({
   invokeLLM: vi.fn(async (params: any) => {
     // Return mock responses based on the system prompt
-    if (params.messages[0]?.content?.includes("SQL query generator")) {
+    if (params.messages[0]?.content?.includes("MySQL 8.0+ SQL generator")) {
       return {
         choices: [
           {
@@ -37,6 +38,14 @@ vi.mock("./_core/llm", () => ({
           },
         ],
       };
+    }
+
+    if (params.messages[0]?.content?.includes("code explainer")) {
+      return { choices: [{ message: { content: "The factorial function is recursive." } }] };
+    }
+
+    if (params.messages[0]?.content?.includes("code optimizer")) {
+      return { choices: [{ message: { content: "for item in arr: print(item)" } }] };
     }
 
     if (params.response_format) {
@@ -72,7 +81,7 @@ vi.mock("./_core/llm", () => ({
           },
         ],
       };
-    }
+      }
 
     if (params.messages[0]?.content?.includes("programmer")) {
       return {
@@ -101,7 +110,7 @@ vi.mock("./_core/llm", () => ({
 describe("LLM Helpers", () => {
   describe("generateSQLQuery", () => {
     it("should generate SQL query from natural language", async () => {
-      const result = await generateSQLQuery(
+      const result: SqlResult[] = await generateSQLQuery(
         "Show all employees with salary > 50000",
         "CREATE TABLE Employee (id INT, name VARCHAR(100), Salary INT);"
       );
@@ -109,11 +118,14 @@ describe("LLM Helpers", () => {
       expect(result).toHaveLength(1);
       expect(result[0]).toContain("SELECT");
       expect(result[0]).toContain("Employee");
+      expect(result[0]).toMatch(/WHERE salary > 50000/i);
     });
 
     it("should handle empty input gracefully", async () => {
-      const result = await generateSQLQuery("", "");
+      const result: SqlResult[] = await generateSQLQuery("", "");
       expect(Array.isArray(result)).toBe(true);
+      // Should return fallback response
+      expect(result[0]).toContain("-- Please name the table");
     });
   });
 
@@ -178,8 +190,10 @@ describe("LLM Helpers", () => {
         "CREATE TABLE Employee (id INT, name VARCHAR(100), Salary INT);"
       );
 
-      expect(result).toContain("query");
+      expect(typeof result).toBe("string");
       expect(result.length > 0).toBe(true);
+      expect(result).toContain("Employee");
+      expect(result).toContain("Salary > 50000");
     });
   });
 
@@ -203,8 +217,9 @@ describe("LLM Helpers", () => {
         "CREATE TABLE Employee (id INT);"
       );
 
-      expect(result.riskLevel).toBeDefined();
-      expect(result.warnings).toBeDefined();
+      expect(result.riskLevel).toBe("high");
+      expect(Array.isArray(result.warnings)).toBe(true);
+      expect(result.warnings.length > 0).toBe(true);
     });
   });
 
@@ -215,8 +230,10 @@ describe("LLM Helpers", () => {
         "python"
       );
 
-      expect(result).toContain("def");
+      expect(typeof result).toBe("string");
       expect(result.length > 0).toBe(true);
+      expect(result).toContain("def");
+      expect(result).toContain("factorial");
     });
   });
 
@@ -227,8 +244,10 @@ describe("LLM Helpers", () => {
         "python"
       );
 
-      expect(result.length > 0).toBe(true);
       expect(typeof result).toBe("string");
+      expect(result.length > 0).toBe(true);
+      expect(result).toContain("factorial");
+      expect(result).toContain("recursive");
     });
   });
 
@@ -243,6 +262,9 @@ describe("LLM Helpers", () => {
       expect(result).toHaveProperty("correctedCode");
       expect(result).toHaveProperty("explanation");
       expect(Array.isArray(result.issues)).toBe(true);
+      expect(result.issues.length > 0).toBe(true);
+      expect(typeof result.correctedCode).toBe("string");
+      expect(typeof result.explanation).toBe("string");
     });
   });
 
@@ -253,8 +275,11 @@ describe("LLM Helpers", () => {
         "python"
       );
 
-      expect(result.length > 0).toBe(true);
       expect(typeof result).toBe("string");
+      expect(result.length > 0).toBe(true);
+      // Should suggest using enumerate or direct iteration
+      expect(result).toContain("for");
+      expect(result).toContain("in");
     });
   });
 });

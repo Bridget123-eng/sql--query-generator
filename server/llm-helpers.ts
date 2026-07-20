@@ -9,15 +9,38 @@ type QueryImpact = {
   analysis: string;
 };
 
-const reservedWords = new Set([
+export type SqlResult = string;
+
+const FALLBACK_SQL = "-- ERROR: Failed to generate query";
+
+/* ======================
+   CONSTANTS & HELPERS
+   ====================== */
+
+const RESERVED_WORDS = new Set([
   "all", "the", "a", "an", "records", "record", "data", "details", "whose", "where", "with",
   "first", "second", "third", "top", "highest", "lowest", "largest", "smallest", "distinct",
   "salary", "result", "results",
 ]);
 
+const MYSQL_FORBIDDEN_PATTERNS = [
+  /::/g,              // PostgreSQL casting
+  /DATE_TRUNC/i,      // PostgreSQL
+  /QUALIFY/i,         // Snowflake/BigQuery
+  /INTERVAL\s+['"]/i, // Interval with quotes (MySQL uses unquoted)
+  /\bSCHEMA\b/i,      // Use DATABASE instead in MySQL
+  /\bILIKE\b/i,       // PostgreSQL case-insensitive LIKE
+  /\bSTRING_AGG\b/i,  // Use GROUP_CONCAT in MySQL
+  /\bARRAY\[/i,       // PostgreSQL arrays
+];
+
+/* ======================
+   CORE HELPERS
+   ====================== */
+
 function identifier(value: string): string | undefined {
   const cleaned = value.replace(/[^a-zA-Z0-9_]/g, "");
-  return cleaned && !reservedWords.has(cleaned.toLowerCase()) ? cleaned : undefined;
+  return cleaned && !RESERVED_WORDS.has(cleaned.toLowerCase()) ? cleaned : undefined;
 }
 
 function extractTable(prompt: string, schema: string): string | undefined {
@@ -60,28 +83,120 @@ function extractFilter(prompt: string): string | undefined {
   return equality ? `${equality[1]} = ${quoteValue(equality[2])}` : undefined;
 }
 
-/**
- * Generates syntactically-valid SQL for common plain-English requests when the
- * hosted AI service is unavailable. It intentionally derives names from the
- * request/schema instead of using a fixed list of sample tables.
- */
+/* ======================
+   STRING SAFETY HELPER
+   ====================== */
+
+function ensureString(str: unknown): string {
+  if (typeof str === 'string') {
+    const trimmed = str.trim();
+    return trimmed.length > 0 ? trimmed : FALLBACK_SQL;
+  }
+  return FALLBACK_SQL;
+}
+
+/* ======================
+   SQL VALIDATION & REPAIR
+   ====================== */
+
+function isSupportedSql(statement: string): boolean {
+  const normalized = statement.trim();
+  return /^(SELECT|INSERT|UPDATE|DELETE)\b/i.test(normalized)
+    || (/^WITH\b/i.test(normalized) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(normalized));
+}
+
+function isMySQL8Compatible(sql: string): boolean {
+  return !MYSQL_FORBIDDEN_PATTERNS.some(pattern => pattern.test(sql));
+}
+
+function extractSqlFromResponse(content: string): string | null {
+  // Try to extract SQL from markdown code blocks first
+  const sqlBlockMatch = content.match(/```(?:sql)?\s*\n([\s\S]*?)\n```/i);
+  if (sqlBlockMatch) return sqlBlockMatch[1].trim();
+
+  // Fallback: look for SQL statement at start of content
+  const sqlStartMatch = content.match(/^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i);
+  if (sqlStartMatch) {
+    // Find end of statement (semicolon or end of string)
+    const startIndex = sqlStartMatch.index ?? 0;
+    const endMatch = content.slice(startIndex).match(/;|$/);
+    if (endMatch) {
+      const endIndex = startIndex + (endMatch.index ?? 0) + (endMatch[0] === ";" ? 1 : 0);
+      return content.slice(startIndex, endIndex).trim();
+    }
+  }
+
+  // Last resort: return trimmed content if it looks like SQL
+  const trimmed = content.trim();
+  if (/^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i.test(trimmed)) return trimmed;
+  return null;
+}
+
+function validateSqlWithSchema(sql: string, schema: string): boolean {
+  if (!isSupportedSql(sql)) return false;
+  if (!isMySQL8Compatible(sql)) return false;
+  return validateSql(sql, schema).valid;
+}
+
+function repairSql(sql: string, schema: string): string | null {
+  // Try fixing common issues
+  let repaired = sql;
+
+  // 1. Remove leading/trailing whitespace and ensure single statement
+  repaired = repaired.trim();
+  if (repaired.endsWith(";")) repaired = repaired.slice(0, -1).trim();
+
+  // 2. Fix missing semicolon (MySQL allows omitting it for single statements, but we prefer it)
+  if (!repaired.endsWith(";")) repaired += ";";
+
+  // 3. Fix common keyword misspellings (Qwen 2.5 Coder specific)
+  const corrections: [RegExp, string][] = [
+    [/SELECY/g, "SELECT"],
+    [/FRROM/g, "FROM"],
+    [/WHERe/g, "WHERE"],
+    [/ORDER BYy/g, "ORDER BY"],
+    [/LIMiT/g, "LIMIT"],
+    [/INSERT INT0/g, "INSERT INTO"],
+    [/UPDATTE/g, "UPDATE"],
+    [/DELLET/g, "DELETE"],
+  ];
+
+  for (const [pattern, replacement] of corrections) {
+    repaired = repaired.replace(pattern, replacement);
+  }
+
+  // 4. Fix missing quotes around string literals (basic heuristic)
+  repaired = repaired.replace(/(=|\s+)(['"]?)([^'";\s]+)\2(?=\s|$|;)/g, (match, p1, p2, p3) => {
+    if (!p2 && !/^-?\d+(?:\.\d+)?$/.test(p3)) {
+      return `${p1}'${p3}'`;
+    }
+    return match;
+  });
+
+  // Validate repaired version
+  return validateSqlWithSchema(repaired, schema) ? repaired : null;
+}
+
+/* ======================
+   FALLBACK LOGIC (IMPROVED)
+   ====================== */
+
 export function localSqlFallback(input: string, schema = ""): string[] {
   const prompt = input.replace(/[\u20b9,$]/g, "").replace(/,/g, "").replace(/\s+/g, " ").trim();
   const isSecondHighestSalary = /\bsecond\s+(?:highest|largest)\s+(?:distinct\s+)?salary\b/i.test(prompt);
   const table = extractTable(prompt, schema)
     ?? (isSecondHighestSalary ? findTableContainingColumn(schema, "salary") : undefined);
   if (!table) {
-    return ["-- Please name the table to query, or select/paste a database schema so I can identify it safely."];
+    return [ensureString("-- Please name the table to query, or select/paste a database schema so I can identify it safely.")];
   }
 
-  // "Highest ... in each department" is a grouped ranking request, not a
-  // department filter. The join keeps every employee tied for the top salary.
+  // Handle highest salary per department (grouped ranking)
   const highestSalaryPerDepartment = /\b(?:employees?|staff)\b[\s\S]*?\bhighest\s+salary\b[\s\S]*?\b(?:in|for)\s+each\s+department\b/i.test(prompt)
     || /\bhighest\s+salary\b[\s\S]*?\b(?:in|for)\s+each\s+department\b/i.test(prompt);
   if (highestSalaryPerDepartment) {
-    return [
-      `SELECT e.*\nFROM ${table} AS e\nINNER JOIN (\n  SELECT department, MAX(salary) AS highest_salary\n  FROM ${table}\n  GROUP BY department\n) AS department_max\n  ON department_max.department = e.department\n AND department_max.highest_salary = e.salary;`,
-    ];
+    return [ensureString(
+      `SELECT e.*\nFROM ${table} AS e\nINNER JOIN (\n  SELECT department, MAX(salary) AS highest_salary\n  FROM ${table}\n  GROUP BY department\n) AS department_max\n  ON department_max.department = e.department\n AND department_max.highest_salary = e.salary;`
+    )];
   }
 
   const filter = extractFilter(prompt);
@@ -91,53 +206,38 @@ export function localSqlFallback(input: string, schema = ""): string[] {
   const descending = /\b(highest|largest|most|descending|desc)\b/i.test(prompt);
 
   if (/\b(delete|remove)\b/i.test(prompt)) {
-    return [`DELETE FROM ${table}${filter ? `\nWHERE ${filter}` : ""};`];
+    return [ensureString(`DELETE FROM ${table}${filter ? `\nWHERE ${filter}` : ""};`)];
   }
   if (/\b(increase|raise)\b/i.test(prompt)) {
     const field = prompt.match(/\b(increase|raise)\s+([a-zA-Z_]\w*)/i)?.[2];
     const percentage = prompt.match(/(\d+(?:\.\d+)?)\s*%/)?.[1];
     if (field && percentage) {
-      return [`UPDATE ${table}\nSET ${field} = ${field} * ${(1 + Number(percentage) / 100).toFixed(4)}${filter ? `\nWHERE ${filter}` : ""};`];
+      return [ensureString(`UPDATE ${table}\nSET ${field} = ${field} * ${(1 + Number(percentage) / 100).toFixed(4)}${filter ? `\nWHERE ${filter}` : ""};`)];
     }
   }
   if (/\b(update|change|set)\b/i.test(prompt)) {
     const assignment = prompt.match(/\b(?:set|change)\s+([a-zA-Z_]\w*)\s+(?:to|=)\s+['"]?([a-zA-Z0-9_ .-]+)['"]?/i);
-    if (assignment) return [`UPDATE ${table}\nSET ${assignment[1]} = ${quoteValue(assignment[2])}${filter ? `\nWHERE ${filter}` : ""};`];
+    if (assignment) return [ensureString(`UPDATE ${table}\nSET ${assignment[1]} = ${quoteValue(assignment[2])}${filter ? `\nWHERE ${filter}` : ""};`)];
   }
   if (/\b(count|how many|number of)\b/i.test(prompt)) {
-    return [`SELECT COUNT(*) AS total\nFROM ${table}${filter ? `\nWHERE ${filter}` : ""};`];
+    return [ensureString(`SELECT COUNT(*) AS total\nFROM ${table}${filter ? `\nWHERE ${filter}` : ""};`)];
   }
 
   if (isSecondHighestSalary) {
-    return [`SELECT DISTINCT salary\nFROM ${table}\nORDER BY salary DESC\nLIMIT 1 OFFSET 1;`];
+    return [ensureString(`SELECT DISTINCT salary\nFROM ${table}\nORDER BY salary DESC\nLIMIT 1 OFFSET 1;`)];
   }
 
   const query = [`SELECT *`, `FROM ${table}`];
   if (filter) query.push(`WHERE ${filter}`);
   if (sort) query.push(`ORDER BY ${sort} ${descending ? "DESC" : "ASC"}`);
   if (limit) query.push(`LIMIT ${limit}`);
-  return [`${query.join("\n")};`];
-}
-
-function isSupportedSql(statement: string): boolean {
-  const normalized = statement.trim();
-  return /^(SELECT|INSERT|UPDATE|DELETE)\b/i.test(normalized)
-    || (/^WITH\b/i.test(normalized) && !/\b(?:INSERT|UPDATE|DELETE)\b/i.test(normalized));
-}
-
-function isSafeGeneratedSql(statement: string, schema: string): boolean {
-  return isSupportedSql(statement) && validateSql(statement, schema).valid;
+  return [ensureString(`${query.join("\n")};`)];
 }
 
 function isUsableFallback(queries: string[]): boolean {
   return queries.length > 0 && !queries[0].trim().startsWith("--");
 }
 
-/**
- * Use the rule-based parser only when it can represent the entire request.
- * Sending a complex request to that parser used to silently discard intent
- * (for example, grouping or date conditions) and produce a generic query.
- */
 function shouldUseLocalSqlFallback(input: string, queries: string[]): boolean {
   if (!isUsableFallback(queries)) return false;
   const prompt = input.toLowerCase();
@@ -149,6 +249,106 @@ function shouldUseLocalSqlFallback(input: string, queries: string[]): boolean {
   return /\b(?:show|list|find|get|display|retrieve|count|how many|number of|delete|remove|increase|raise|update|change|set)\b/.test(prompt);
 }
 
+/* ======================
+   MAIN FUNCTION (OPTIMIZED FOR QWEN 2.5 CODER)
+   ====================== */
+
+export async function generateSQLQuery(
+  input: string,
+  schema: string,
+  previousContext?: string
+): Promise<string[]> {
+  // Step 1: Try rule-based fallback first for simple, deterministic cases
+  const fallback = localSqlFallback(input, schema);
+  if (!input.trim()) return fallback;
+  if (shouldUseLocalSqlFallback(input, fallback)) return fallback;
+
+  // Step 2: Generate with LLM (Qwen 2.5 Coder optimized prompt)
+  const systemPrompt = `You are Qwen 2.5 Coder, an expert MySQL 8.0+ SQL generator. Follow these rules STRICTLY:
+
+  1. OUTPUT ONLY VALID MYSQL 8.0+ SQL - NO EXPLANATIONS, MARKDOWN, OR COMMENTS
+  2. USE EXACT TABLE/COLUMN NAMES FROM SCHEMA - NEVER INVENT NAMES
+  3. FOR AGGREGATIONS: 
+     - Use GROUP BY for "per"/"each" requests
+     - Use window functions (ROW_NUMBER, RANK) for rankings
+     - Never use ::date - use CAST(... AS DATE) or DATE_FORMAT
+  4. FOR FILTERS:
+     - Use = for exact matches, LIKE for partial
+     - Never use ILIKE - use LOWER(column) = LOWER(value) or MySQL 8.0+'s REGEXP
+  5. FOR UPDATES:
+     - Always include WHERE unless explicitly asked to update all rows
+     - Use SET column = column * (1 + percentage/100) for percentage increases
+  6. FOR DATE OPERATIONS:
+     - Use DATE_SUB(CURDATE(), INTERVAL n UNIT) for past dates
+     - Use DATE_ADD(CURDATE(), INTERVAL n UNIT) for future dates
+  7. AVOIDE THESE POSTGRESQL-SPECIFIC CONSTRUCTS:
+     - :: casting, DATE_TRUNC, QUALIFY, INTERVAL with quotes, STRING_AGG, ARRAY[]
+  8. SINGLE STATEMENT ONLY - NO MULTIPLE QUERIES
+  9. END WITH SEMICOLON
+  10. If unsure about table/column, output: -- ERROR: [specific missing element]
+
+  Available database schema:
+  ${schema}
+
+  ${previousContext ? `Previous context:\n${previousContext}` : ""}`;
+
+  try {
+    const response = await invokeLLM({
+      model: ENV.llmModel,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: input },
+      ],
+      max_tokens: 256,
+    });
+
+    const content = response.choices[0]?.message.content;
+    if (!content || typeof content !== "string") throw new Error("Empty LLM response");
+
+    // Step 3: Extract SQL from response
+    let sql = extractSqlFromResponse(content);
+    if (!sql) {
+      // Fallback to raw content if extraction failed
+      sql = content.trim();
+    }
+
+    // Step 4: Validate initial SQL
+    if (validateSqlWithSchema(sql, schema)) {
+      return [ensureString(sql)];
+    }
+
+    // Step 5: Attempt repair (max 2 attempts)
+    let attempts = 0;
+    const maxAttempts = 2;
+    let repairedSql: string | null = null;
+
+    while (attempts < maxAttempts && !repairedSql) {
+      repairedSql = repairSql(sql, schema);
+      if (repairedSql && validateSqlWithSchema(repairedSql, schema)) {
+        break;
+      }
+      sql = repairedSql || sql; // Use repaired version for next attempt if available
+      attempts++;
+    }
+
+    if (repairedSql) {
+      return [ensureString(repairedSql)];
+    }
+
+    // Step 6: Fallback to rule-based if LLM+repair failed
+    console.warn("LLM SQL generation failed after repair attempts, using fallback");
+    return fallback;
+
+  } catch (error) {
+    console.error("Ollama SQL generation failed", error);
+    // Return fallback on any LLM error
+    return fallback;
+  }
+}
+
+/* ======================
+   UNCHANGED HELPERS (EXPLANATION, IMPACT, ETC.)
+   ====================== */
 export function localExplanation(query: string): string {
   const operation = query.trim().match(/^(SELECT|INSERT|UPDATE|DELETE)/i)?.[1]?.toUpperCase();
   const tables = [...query.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+([`"\w.]+)/gi)].map((match) => match[1].replace(/[`"]+/g, ""));
@@ -173,83 +373,25 @@ export function localImpact(query: string): QueryImpact {
   const limit = query.match(/\bLIMIT\s+(\d+)/i)?.[1];
   if (operation === "DELETE" || operation === "UPDATE") {
     const risky = !hasWhere;
-    return { warnings: risky ? [`${operation} has no WHERE clause and may change every row.`] : ["Review the matching rows before executing this write operation."], estimatedRows: risky ? "All rows in the target table" : "Depends on rows matching the filter", riskLevel: risky ? "high" : "medium", analysis: risky ? "This is a broad data-changing operation." : "This is a filtered data-changing operation; confirm the preview before execution." };
+    return { 
+      warnings: risky ? [`${operation} has no WHERE clause and may change every row.`] : ["Review the matching rows before executing this write operation."], 
+      estimatedRows: risky ? "All rows in the target table" : "Depends on rows matching the filter", 
+      riskLevel: risky ? "high" : "medium", 
+      analysis: risky ? "This is a broad data-changing operation." : "This is a filtered data-changing operation; confirm the preview before execution." 
+    };
   }
   if (operation === "INSERT") return { warnings: [], estimatedRows: "1 or more rows", riskLevel: "medium", analysis: "This inserts data. Verify required columns and constraints first." };
-  if (operation === "SELECT") return { warnings: hasWhere ? [] : ["No WHERE clause may return a large result set."], estimatedRows: limit ? `${limit} rows at most` : "Depends on the table size and filters", riskLevel: hasWhere || limit ? "low" : "medium", analysis: "Read-only query; no database records will be changed." };
+  if (operation === "SELECT") return { 
+    warnings: hasWhere ? [] : ["No WHERE clause may return a large result set."], 
+    estimatedRows: limit ? `${limit} rows at most` : "Depends on the table size and filters", 
+    riskLevel: hasWhere || limit ? "low" : "medium", 
+    analysis: "Read-only query; no database records will be changed." 
+  };
   return { warnings: ["The SQL statement could not be validated."], estimatedRows: "Unknown", riskLevel: "high", analysis: "Only SELECT, INSERT, UPDATE, and DELETE statements are supported." };
 }
 
-function parseJsonResponse(content: string): unknown {
-  return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, ""));
-}
-
-/**
- * Generate SQL query from natural language with streaming support
- * Returns the full response for streaming to client
- */
-export async function generateSQLQuery(
-  input: string,
-  schema: string,
-  previousContext?: string
-): Promise<string[]> {
-  // Common requests are more accurately handled by the deterministic parser
-  // than by a small local model. This also guarantees predictable SQL for
-  // filters, counts, rankings, sorting, and simple updates.
-  const fallback = localSqlFallback(input, schema);
-  if (shouldUseLocalSqlFallback(input, fallback)) return fallback;
-
-  const systemPrompt = `You are an expert MySQL 8+ query generator. Your task is to convert natural language requirements into valid, optimized MySQL queries.
-
-When generating queries:
-1. Understand ordinary, conversational user requests and return EXACTLY ONE valid SQL statement that answers every part of the request. Return SQL only: no explanation, markdown fences, comments, or alternative queries.
-2. Use MySQL 8+ syntax only. Do not use PostgreSQL-only syntax such as ::date, DATE_TRUNC, QUALIFY, or INTERVAL '6 months'; use CAST(... AS DATE), DATE_FORMAT, a CTE/subquery, and DATE_SUB(CURDATE(), INTERVAL 6 MONTH) instead.
-3. Use proper formatting and indentation. Prefer explicit columns, selective WHERE clauses, and LIMIT for exploratory SELECT queries when the request does not ask for every row. For requests such as "highest salary in each department", use GROUP BY with MAX or a MySQL 8 window function, never a filter such as department = 'each'.
-4. Use the supplied schema exactly when it is available. Never use a table or column that is not in the schema. Never interpret ranking words such as "second", "highest", or "distinct" as table or column names. If no schema is supplied and the request does not explicitly name a table, return no SQL.
-7. Be capable of SELECT, INSERT, UPDATE, DELETE, joins, subqueries, CTEs (including recursive CTEs), window functions, grouping, ranking, date functions, duplicate detection, reporting, and index recommendations. For index recommendations, return the CREATE INDEX statement but clearly do not treat it as a data query.
-
-Available database schema:
-${schema}
-
-${previousContext ? `Previous context:\n${previousContext}` : ""}`;
-
-  try {
-  const response = await invokeLLM({
-    model: ENV.llmModel,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: input },
-    ],
-    max_tokens: 256,
-  });
-
-  const content = response.choices[0]?.message.content;
-  if (typeof content !== "string") return fallback;
-
-  // Extract all SQL blocks
-  const queries = content.match(/```(?:sql)?\s*\n([\s\S]*?)\n```/gi);
-  if (queries) {
-    const extracted = queries
-      .map(q => q.replace(/^```(?:sql)?\s*\n|\n```$/gi, "").trim())
-      .filter(query => isSafeGeneratedSql(query, schema))
-      .slice(0, 1);
-    return extracted.length ? extracted : fallback;
-  } else {
-    // A provider can return a prose refusal or an error message. Never show it
-    // as though it were executable SQL.
-    return isSafeGeneratedSql(content, schema) ? [content.trim()] : fallback;
-  }
-  } catch (error) {
-    console.error("Ollama SQL generation failed", error);
-    throw new Error("Ollama could not generate the SQL query. Confirm that Ollama is running and the selected model is loaded.");
-  }
-}
-
-/**
- * Generate SQL explanation from a query
- */
-export async function explainSQLQuery(query: string, schema: string): Promise<string> {
-  if (!ENV.ollamaAuxiliaryAi) return localExplanation(query);
+export function explainSQLQuery(query: string, schema: string): Promise<string> {
+  if (!ENV.ollamaAuxiliaryAi) return Promise.resolve(localExplanation(query));
   const systemPrompt = `You are an expert SQL query explainer. Your task is to explain SQL queries in simple, clear language.
 
 When explaining:
@@ -262,37 +404,24 @@ When explaining:
 Database schema context:
 ${schema}`;
 
-  try {
-  const response = await invokeLLM({
+  return invokeLLM({
     model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Explain this SQL query:\n\n${query}` },
     ],
     max_tokens: 1500,
-  });
-
-  const content = response.choices[0]?.message.content;
-  return typeof content === "string" && content.trim() ? content : localExplanation(query);
-  } catch (error) {
-    console.warn("AI SQL explanation unavailable; using local explanation", error);
-    return localExplanation(query);
-  }
+  }).then(response => {
+    const content = response.choices[0]?.message.content;
+    return typeof content === "string" && content.trim() ? content : localExplanation(query);
+  }).catch(() => localExplanation(query));
 }
 
-/**
- * Analyze query for potential issues and estimate impact
- */
-export async function analyzeQueryImpact(
+export function analyzeQueryImpact(
   query: string,
   schema: string
-): Promise<{
-  warnings: string[];
-  estimatedRows: string;
-  riskLevel: "low" | "medium" | "high";
-  analysis: string;
-}> {
-  if (!ENV.ollamaAuxiliaryAi) return localImpact(query);
+): Promise<QueryImpact> {
+  if (!ENV.ollamaAuxiliaryAi) return Promise.resolve(localImpact(query));
   const systemPrompt = `You are a SQL query analyzer. Analyze the provided query for potential issues and estimate its impact.
 
 Return a JSON object with:
@@ -300,7 +429,7 @@ Return a JSON object with:
   "warnings": ["array of potential issues or risky operations"],
   "estimatedRows": "estimated number of rows affected/returned",
   "riskLevel": "low|medium|high",
-  "analysis": "brief analysis of the query impact"
+  "analysis": "brief analysis of query impact"
 }
 
 Focus on:
@@ -312,8 +441,7 @@ Focus on:
 Database schema:
 ${schema}`;
 
-  try {
-  const response = await invokeLLM({
+  return invokeLLM({
     model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
@@ -351,58 +479,35 @@ ${schema}`;
         },
       },
     },
-  });
-
-  try {
-    const content = response.choices[0]?.message.content;
-    if (!content || typeof content !== "string") throw new Error("No response from LLM");
-    return parseJsonResponse(content) as QueryImpact;
-  } catch (error) {
-    console.error("Failed to parse query analysis:", error);
-    return localImpact(query);
-  }
-  } catch (error) {
-    console.warn("AI query analysis unavailable; using local analysis", error);
-    return localImpact(query);
-  }
+  }).then(response => {
+    try {
+      const content = response.choices[0]?.message.content;
+      if (!content || typeof content !== "string") throw new Error("No response from LLM");
+      return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "")) as QueryImpact;
+    } catch (error) {
+      console.error("Failed to parse query analysis:", error);
+      return localImpact(query);
+    }
+  }).catch(() => localImpact(query));
 }
 
-/**
- * Generate code from natural language
- */
-export async function generateCode(
-  input: string,
-  language: string,
-  previousContext?: string
-): Promise<string> {
-  const systemPrompt = `You are an expert ${language} programmer. Your task is to generate clean, well-structured code from natural language requirements.
+export function generateCode(prompt: string, language: string): Promise<string> {
+  const systemPrompt = `You are an expert ${language} programmer. Return only complete, runnable code that fulfills the user's request. Do not include markdown fences or explanations.`;
 
-When generating code:
-1. Return ONLY the code, no explanation or markdown
-2. Use best practices and industry standards for ${language}
-3. Include meaningful variable names and comments
-4. Handle edge cases appropriately
-5. Optimize for readability and performance
-
-${previousContext ? `Previous context:\n${previousContext}` : ""}`;
-
-  const response = await invokeLLM({
+  return invokeLLM({
     model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: input },
+      { role: "user", content: prompt },
     ],
     max_tokens: 2500,
-  });
-
-  const content = response.choices[0]?.message.content;
-  return typeof content === "string" ? content : "";
+  }).then(response => {
+    const content = response.choices[0]?.message.content;
+    return typeof content === "string" ? content.trim() : "";
+  }).catch(() => "");
 }
 
-/**
- * Explain code
- */
-export async function explainCode(code: string, language: string): Promise<string> {
+export function explainCode(code: string, language: string): Promise<string> {
   const systemPrompt = `You are an expert ${language} code explainer. Your task is to explain code in simple, clear language.
 
 When explaining:
@@ -412,23 +517,20 @@ When explaining:
 4. Note any potential improvements
 5. Keep explanations concise but thorough`;
 
-  const response = await invokeLLM({
+  return invokeLLM({
     model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Explain this ${language} code:\n\n${code}` },
     ],
     max_tokens: 1500,
-  });
-
-  const content = response.choices[0]?.message.content;
-  return typeof content === "string" ? content : "";
+  }).then(response => {
+    const content = response.choices[0]?.message.content;
+    return typeof content === "string" ? content : "";
+  }).catch(() => "");
 }
 
-/**
- * Debug code and suggest fixes
- */
-export async function debugCode(
+export function debugCode(
   code: string,
   language: string,
   errorMessage?: string
@@ -456,7 +558,7 @@ Be thorough in identifying:
     ? `Debug this ${language} code (error: ${errorMessage}):\n\n${code}`
     : `Debug this ${language} code:\n\n${code}`;
 
-  const response = await invokeLLM({
+  return invokeLLM({
     model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
@@ -489,30 +591,31 @@ Be thorough in identifying:
         },
       },
     },
-  });
-
-  try {
-    const content = response.choices[0]?.message.content;
-    if (!content || typeof content !== "string") throw new Error("No response from LLM");
-    return parseJsonResponse(content) as {
-      issues: string[];
-      correctedCode: string;
-      explanation: string;
-    };
-  } catch (error) {
-    console.error("Failed to parse debug response:", error);
-    return {
-      issues: ["Unable to debug code"],
-      correctedCode: code,
-      explanation: "Could not parse debug response",
-    };
-  }
+  }).then(response => {
+    try {
+      const content = response.choices[0]?.message.content;
+      if (!content || typeof content !== "string") throw new Error("No response from LLM");
+      return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "")) as {
+        issues: string[];
+        correctedCode: string;
+        explanation: string;
+      };
+    } catch (error) {
+      console.error("Failed to parse debug response:", error);
+      return {
+        issues: ["Unable to debug code"],
+        correctedCode: code,
+        explanation: "Could not parse debug response",
+      };
+    }
+  }).catch(() => ({
+    issues: ["Unable to debug code"],
+    correctedCode: code,
+    explanation: "Could not parse debug response",
+  }));
 }
 
-/**
- * Optimize code
- */
-export async function optimizeCode(code: string, language: string): Promise<string> {
+export function optimizeCode(code: string, language: string): Promise<string> {
   const systemPrompt = `You are an expert ${language} code optimizer. Your task is to improve code for performance, readability, and maintainability.
 
 When optimizing:
@@ -522,15 +625,15 @@ When optimizing:
 4. Improve performance where possible
 5. Enhance code clarity`;
 
-  const response = await invokeLLM({
+  return invokeLLM({
     model: ENV.llmModel,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: `Optimize this ${language} code:\n\n${code}` },
     ],
     max_tokens: 2500,
-  });
-
-  const content = response.choices[0]?.message.content;
-  return typeof content === "string" ? content : "";
+  }).then(response => {
+    const content = response.choices[0]?.message.content;
+    return typeof content === "string" ? content : "";
+  }).catch(() => "");
 }

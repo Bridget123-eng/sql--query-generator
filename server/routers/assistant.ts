@@ -169,7 +169,8 @@ export const assistantRouter = router({
         }
 
         // Generate SQL query
-        const queries = await generateSQLQuery(input.prompt, schemaText);
+        const generatedResults = await generateSQLQuery(input.prompt, schemaText);
+        const queries = generatedResults;
 
         // For now, let's assume the first query is the primary one for initial analysis
         const primaryQuery = queries[0] || "";
@@ -177,7 +178,9 @@ export const assistantRouter = router({
 
         // Extract tables involved (a simple regex for now, can be improved)
         const tablesInvolvedMatch = primaryQuery.match(/(?:FROM|JOIN)\s+([`"\w\d\.]+)/gi);
-        const tablesInvolved = tablesInvolvedMatch ? Array.from(new Set(tablesInvolvedMatch.map(m => m.split(/\s+/)[1].replace(/[`"']/g, "")))).join(", ") : "Unknown";
+        const tablesInvolved = tablesInvolvedMatch
+          ? Array.from(new Set(tablesInvolvedMatch.map((m: string) => m.split(/\s+/)[1]?.replace(/[`"']/g, "") ?? ""))).filter(Boolean).join(", ")
+          : "Unknown";
 
         return { queries, analysis };
       } catch (error) {
